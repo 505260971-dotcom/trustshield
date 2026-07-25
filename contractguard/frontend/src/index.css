@@ -1,0 +1,16 @@
+body { margin: 0; font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background:#f5f7fb; }
+.boot,.login-shell{min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at top right,#d9edff,#f5f7fb 45%,#eef2f8)}
+.login-card{width:420px;box-shadow:0 24px 70px rgba(22,119,255,.16);border-radius:18px}
+.brand{height:64px;display:flex;align-items:center;justify-content:center;gap:9px;color:#fff;font-size:18px;font-weight:700}.brand .anticon{font-size:24px;color:#7ee787}
+.sider-foot{position:absolute;bottom:16px;width:100%;text-align:center;color:#8290a8;font-size:11px}.sider-foot .ant-typography{color:#8290a8}
+.workspace-header{background:#fff!important;padding:0 24px!important;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf0f5}.workspace-content{padding:20px;overflow:auto;background:#f5f7fb}
+.page-intro{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin:2px 0 18px}.page-intro .ant-typography{margin:0 0 4px}.review-meta-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1.5fr;gap:0 12px}.case-id{font-size:11px;color:#8c8c8c;font-weight:400}.case-note{padding:2px 12px;color:#595959}.case-note .ant-select{vertical-align:middle}
+.ant-upload-drag-icon { margin: 12px 0; }
+.row-high { background: #fff1f0 !important; }
+.row-high > td { background: #fff1f0 !important; }
+.row-role-hl { background: #fffbe6 !important; }
+.row-role-hl > td { background: #fffbe6 !important; }
+.risk-cell-text{display:block;white-space:normal;word-break:break-word;line-height:1.55}
+.ant-table-tbody > tr > td{vertical-align:top}
+@media (max-width:900px){.workspace-header{padding:0 14px!important}.workspace-header .ant-space{gap:6px!important}.workspace-header .ant-badge{display:none}.workspace-content{padding:14px}.page-intro{align-items:stretch;flex-direction:column}.review-meta-grid{grid-template-columns:1fr 1fr}.workspace-header .ant-typography{max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+@media (max-width:560px){.review-meta-grid{grid-template-columns:1fr}.workspace-header .ant-btn{padding-inline:7px}.workspace-header .ant-btn:not(:last-child){font-size:0}.workspace-header .ant-btn:not(:last-child) .anticon{font-size:14px}}

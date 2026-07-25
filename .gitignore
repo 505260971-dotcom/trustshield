@@ -1,0 +1,30 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+**/.env
+
+# ContractGuard runtime (local only)
+contractguard/backend/.env
+contractguard/backend/data/
+contractguard/runtime/
+contractguard/frontend/node_modules/
+contractguard/frontend/dist/
+
+# Optional local tooling
+*.sqlite
+*.db
+.claude/
