@@ -6,7 +6,7 @@
 | --- | --- | --- | --- | --- |
 | 1 | 信审预留 CRM 端口 | `POST/GET /api/integrations/crm/credit-hooks`；信审页「CRM 对接端口」 | 模拟 CRM 推送客户 → 创建信审草稿 | 已做 Mock |
 | 2 | 本地第三方报告上传解读 | 信审模块（同学） | — | 不在本合同侧范围 |
-| 3 | 发送 Agent 前脱敏 + 可还原 | `mask` / `smart_mask` + 加密 `mask_mappings` | 审查链路步骤 + 报告「脱敏实体数」 | 已做 |
+| 3 | 发送 Agent 前脱敏 + 可还原 | `backend/app/services/mask` / `smart_mask` + 加密 `mask_mappings` | 审查链路步骤 + 报告「脱敏实体数」 | 已做 |
 | 4 | 泛微 OA 集成 | `OAAdapter` + 案件工作流「推送到 OA」 | 创建流程 → 角色决策 → 批量挂载建议 → 导出 revised/plain | 已做 Mock |
 | 5 | 多语言翻译与段后插入 | `translate` 持久化 + `mode=bilingual` 导出 | 翻译弹窗 → 导出双语对照稿 | 已做 |
 | 6 | 多格式多文件 | DOCX/PDF/XLSX/TXT/PNG；同案附件上传切换 | 批量审查 + 案件附件预览 | 已做（OCR 依赖本机 tesseract） |

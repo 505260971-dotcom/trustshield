@@ -17,4 +17,4 @@
 4. `03-演示与交付/demo-script.md` 5 分钟演示  
 5. `02-接口与验收/` 联调与回归  
 
-可运行工程在仓库根目录的 `contractguard/`。
+可运行工程在仓库**根目录**（`backend/`、`frontend/`、`dev.ps1`）。

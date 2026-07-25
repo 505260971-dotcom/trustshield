@@ -1,9 +1,0 @@
-# Local overrides; see repository root .gitignore
-backend/.env
-backend/data/
-runtime/
-frontend/node_modules/
-frontend/dist/
-__pycache__/
-*.pyc
-.venv/

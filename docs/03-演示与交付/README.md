@@ -4,4 +4,4 @@
 | --- | --- |
 | [demo-script.md](./demo-script.md) | 约 5 分钟功能演示脚本与话术备忘 |
 
-可运行工程：仓库根目录 `contractguard/`，执行 `.\dev.ps1`。
+可运行工程：仓库根目录，执行 `.\dev.ps1`。
