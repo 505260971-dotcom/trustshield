@@ -9,7 +9,7 @@ import os, sys, json, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from app.graph.review_graph import run_review
 
-DATA = os.path.join(os.path.dirname(__file__), '..', '..', '..', '数据包-信审与合同评审', '2）合同与订单样本')
+DATA = os.path.join(os.path.dirname(__file__), '..', '..', 'docs', '00-命题与数据', '数据包-信审与合同评审', '2）合同与订单样本')
 
 SAMPLES = [
     ('销售合同 例1（客户的采购合同）Sales Contract #1.docx', '模塑一体',

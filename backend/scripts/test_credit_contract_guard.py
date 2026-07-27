@@ -19,7 +19,7 @@ from app import store
 from app.services.credit import assess_credit_compliance, assess_customer_binding
 
 
-def approved_credit(admin, days=45):
+def approved_credit(reviewer, director, cfo, days=45):
     item = store.create_credit_case('测试客户甲', {
         'max_credit_amount': 100000,
         'currency': 'CNY',
@@ -27,15 +27,24 @@ def approved_credit(admin, days=45):
         'min_prepayment_ratio': 30,
         'allowed_payment_methods': ['bank_transfer'],
         'allow_vmi_jit': False,
-    }, '回归测试信审', admin)
-    store.submit_credit_case(item['case_id'], admin)
-    return store.decide_credit_case(item['case_id'], 'approved', '信审批准', admin)
+    }, '回归测试信审', reviewer)
+    store.submit_credit_case(item['case_id'], reviewer)
+    try:
+        store.decide_credit_case(item['case_id'], 'approved', '试图跳过主管复核', cfo)
+        raise AssertionError('集团财务总监不得跳过财务审批主管直接生效信审')
+    except ValueError as exc:
+        assert '财务审批主管' in str(exc)
+    item = store.decide_credit_case(item['case_id'], 'approved', '主管复核通过', director)
+    assert item['status'] == 'pending_final'
+    return store.decide_credit_case(item['case_id'], 'approved', '集团财务总监最终批核', cfo)
 
 
 def main():
     store.init_db()
     admin = store.authenticate('admin', 'AdminPassword2026!')
-    credit_v1 = approved_credit(admin)
+    reviewer = store.create_user('reviewer', '信用审核专员', 'reviewer', 'ReviewerPassword2026!')
+    director = store.create_user('director', '财务审批主管', 'director', 'DirectorPassword2026!')
+    credit_v1 = approved_credit(reviewer, director, admin)
     assert store.require_active_credit_case(credit_v1['case_id'])['version'] == 1
 
     clauses = [{'id': 'C1', 'text': '货物交付后60天付款，交付前支付20%预付款，付款方式为银行承兑汇票，并采用VMI模式。'}]
@@ -58,7 +67,7 @@ def main():
 
     # A commercial relaxation must produce a new credit version.  The old
     # contract binding becomes invalid and must be re-reviewed.
-    credit_v2 = approved_credit(admin, days=60)
+    credit_v2 = approved_credit(reviewer, director, admin, days=60)
     assert credit_v2['version'] == 2
     try:
         store.contract_credit_binding('credit-review-1', require_current=True)

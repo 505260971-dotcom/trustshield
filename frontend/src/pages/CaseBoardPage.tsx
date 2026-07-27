@@ -7,7 +7,7 @@ import { useAuth } from '../context/AuthContext'
 import type { CaseItem, TeamMember } from '../types'
 import { fmtTime } from '../components/common'
 
-const statusLabels:Record<string,string>={running:'AI 审查中',pending_review:'待人工复核',in_review:'法务处理中',returned:'待补充材料',approved:'已确认',closed:'已关闭',failed:'审查失败'}
+const statusLabels:Record<string,string>={running:'AI 审查中',pending_review:'待信用审核专员复核',in_review:'信用审核处理中',returned:'待补充材料',approved:'已确认',closed:'已关闭',failed:'审查失败'}
 const statusColor:Record<string,string>={running:'processing',pending_review:'gold',in_review:'blue',returned:'orange',approved:'green',closed:'default',failed:'red'}
 const priorityColor:Record<string,string>={low:'default',normal:'blue',high:'orange',urgent:'red'}
 const priorityLabel:Record<string,string>={low:'低',normal:'普通',high:'高',urgent:'紧急'}
@@ -15,7 +15,7 @@ const workflowOptions=Object.entries(statusLabels).filter(([value])=>!['running'
 
 export default function CaseBoardPage({openId,refreshKey}:{openId:(id:string)=>void;refreshKey:number}){
  const {user}=useAuth(); const [items,setItems]=useState<CaseItem[]>([]);const [members,setMembers]=useState<TeamMember[]>([]);const [loading,setLoading]=useState(true);const [filter,setFilter]=useState('open')
- const canManage=['admin','legal','director','ceo'].includes(user?.role||'')
+ const canManage=['admin','reviewer','director'].includes(user?.role||'')
  const load=async()=>{setLoading(true);try{const [cases,reviewers]=await Promise.all([api.cases(),api.reviewers().catch(()=>({items:[]}))]);setItems(cases.items);setMembers(reviewers.items)}catch(e:any){message.error(`加载案件失败：${e.message||e}`)}finally{setLoading(false)}}
  useEffect(()=>{load()},[refreshKey])
  const update=async(jobId:string,body:any)=>{try{await api.updateCase(jobId,body);message.success('案件已更新');load()}catch(e:any){message.error(`更新失败：${e.message||e}`)}}

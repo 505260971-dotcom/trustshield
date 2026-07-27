@@ -73,8 +73,8 @@ def assess_clause(text: str, business_type: str) -> dict[str, dict]:
         if vmi:
             findings['R16'] = {
                 'evidence': vmi.group(0),
-                'facts': {'delivery_mode': vmi.group(0), 'approval_role': '总监'},
-                'note': '本地提取：存在 VMI/JIT/供应商管理库存交付模式，需总监书面审批',
+                'facts': {'delivery_mode': vmi.group(0), 'approval_role': '财务审批主管'},
+                'note': '本地提取：存在 VMI/JIT/供应商管理库存交付模式，需财务审批主管书面审批',
             }
     validity = _VALIDITY.search(value)
     if validity and int(validity.group(1)) > 5:

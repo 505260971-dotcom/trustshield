@@ -19,7 +19,7 @@ def main():
     assert 'R06' not in assess_clause('订单取消须提前 30 天通知，并补偿已产生的原材料成本。', '一般')
 
     r16 = assess_clause('供应商应按照 VMI 模式维持安全库存。', '模塑一体')
-    assert r16['R16']['facts']['approval_role'] == '总监'
+    assert r16['R16']['facts']['approval_role'] == '财务审批主管'
     assert 'R16' not in assess_clause('供应商应按照 VMI 模式维持安全库存。', '一般')
     assert assess_clause('本合同有效期为 8 年。', '一般')['R11']['facts']['validity_years'] == 8
     assert 'R11' in assess_clause('本协议有效期至双方权利和义务履行完毕之日止。', '一般')

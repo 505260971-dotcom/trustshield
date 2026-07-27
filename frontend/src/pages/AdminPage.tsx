@@ -7,7 +7,7 @@ import type { RuleItem, RuleVersion } from '../types'
 
 const { Text } = Typography
 const businessTypes = ['全部', '一般', '模塑一体', 'TKM', 'TKP', '采购订单']
-const labels: Record<string, string> = { admin: '管理员', credit: '信审人员', legal: '法务', director: '总监', ceo: 'CEO', business: '业务人员' }
+const labels: Record<string, string> = { admin: '集团财务总监 / 最终审批人', director: '财务审批主管', reviewer: '信用审核专员', business: '业务申请人' }
 type User = { id:string; username:string; display_name:string; role:string; active:number; created_at:number }
 
 export default function AdminPage () {
@@ -66,7 +66,7 @@ export default function AdminPage () {
   }
 
   return <>
-    <Card title={<Space><TeamOutlined />团队成员与合同评审权限</Space>} extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => setUserOpen(true)}>新增成员</Button>}>
+    <Card title={<Space><TeamOutlined />团队成员与分级审批权限</Space>} extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => setUserOpen(true)}>新增成员</Button>}>
       <Table rowKey="id" dataSource={users} pagination={false} columns={[
         { title: '姓名', dataIndex: 'display_name' }, { title: '用户名', dataIndex: 'username' },
         { title: '角色', dataIndex: 'role', render: (value: string) => <Tag color={value === 'admin' ? 'red' : 'blue'}>{labels[value] || value}</Tag> },
@@ -95,12 +95,12 @@ export default function AdminPage () {
     </Card>
 
     <Drawer title="新增合同评审成员" open={userOpen} onClose={() => setUserOpen(false)} width={420}>
-      <Form form={userForm} layout="vertical" onFinish={createUser} initialValues={{ role:'legal' }}>
-        <Form.Item name="display_name" label="姓名" rules={[{ required:true }]}><Input /></Form.Item><Form.Item name="username" label="用户名" rules={[{ required:true, min:3 }]}><Input /></Form.Item><Form.Item name="role" label="角色" rules={[{ required:true }]}><Select options={['admin','credit','legal','director','ceo','business'].map(value => ({ value, label:labels[value] }))} /></Form.Item><Form.Item name="password" label="初始密码" rules={[{ required:true, min:10 }]}><Input.Password /></Form.Item><Button type="primary" htmlType="submit">创建成员</Button>
+      <Form form={userForm} layout="vertical" onFinish={createUser} initialValues={{ role:'reviewer' }}>
+        <Form.Item name="display_name" label="姓名" rules={[{ required:true }]}><Input /></Form.Item><Form.Item name="username" label="用户名" rules={[{ required:true, min:3 }]}><Input /></Form.Item><Form.Item name="role" label="角色" rules={[{ required:true }]}><Select options={['business','reviewer','director','admin'].map(value => ({ value, label:labels[value] }))} /></Form.Item><Form.Item name="password" label="初始密码" rules={[{ required:true, min:10 }]}><Input.Password /></Form.Item><Button type="primary" htmlType="submit">创建成员</Button>
       </Form>
     </Drawer>
     <Modal title={`编辑 ${editing?.id || ''} 草稿规则`} open={ruleOpen} onCancel={() => setRuleOpen(false)} onOk={saveRule} okText="保存草稿">
-      <Form form={ruleForm} layout="vertical"><Form.Item name="baseline" label="底线规则" rules={[{ required:true }]}><Input.TextArea rows={2} /></Form.Item><Form.Item name="check" label="裁决说明" rules={[{ required:true }]}><Input.TextArea rows={2} /></Form.Item><Form.Item name="severity" label="风险等级" rules={[{ required:true }]}><Select options={['high','mid','low'].map(value => ({ value, label:value }))} /></Form.Item><Form.Item name="applies_to" label="适用业务类型" rules={[{ required:true }]}><Select mode="multiple" options={businessTypes.map(value => ({ value, label:value }))} /></Form.Item><Form.Item name="approval_role" label="例外审批角色"><Select allowClear options={[{ value:'ceo', label:'CEO' }, { value:'director', label:'总监' }]} /></Form.Item><Form.Item name="template" label="红线改写模板" rules={[{ required:true }]}><Input.TextArea rows={3} /></Form.Item></Form>
+      <Form form={ruleForm} layout="vertical"><Form.Item name="baseline" label="底线规则" rules={[{ required:true }]}><Input.TextArea rows={2} /></Form.Item><Form.Item name="check" label="裁决说明" rules={[{ required:true }]}><Input.TextArea rows={2} /></Form.Item><Form.Item name="severity" label="风险等级" rules={[{ required:true }]}><Select options={['high','mid','low'].map(value => ({ value, label:value }))} /></Form.Item><Form.Item name="applies_to" label="适用业务类型" rules={[{ required:true }]}><Select mode="multiple" options={businessTypes.map(value => ({ value, label:value }))} /></Form.Item><Form.Item name="approval_role" label="例外审批层级"><Select allowClear options={[{ value:'director', label:'财务审批主管' }, { value:'admin', label:'集团财务总监 / 最终审批人' }]} /></Form.Item><Form.Item name="template" label="红线改写模板" rules={[{ required:true }]}><Input.TextArea rows={3} /></Form.Item></Form>
     </Modal>
   </>
 }

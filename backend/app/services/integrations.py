@@ -48,7 +48,7 @@ class OAAdapter:
         return {'flow_id': flow_id, 'mock': True, 'status': 'draft', 'job_id': job_id}
 
     def submit_role_decision(self, flow_id, role, decision, note=''):
-        """各评审角色(法务/总监/CEO)提交采纳/驳回/修改决策。"""
+        """各评审层级（信用审核专员/财务审批主管/集团财务总监最终审批人）提交决策。"""
         f = self._flows.get(flow_id)
         if not f:
             return {'ok': False, 'msg': 'flow not found'}
@@ -87,11 +87,11 @@ class OAAdapter:
 oa = OAAdapter()
 
 # ---- 评审角色矩阵(可配置) ----
-APPROVAL_ROLES = ['法务', '总监', 'CEO']
+APPROVAL_ROLES = ['信用审核专员', '财务审批主管', '集团财务总监 / 最终审批人']
 ROLE_FOCUS = {
-    '法务': ['all'],  # 全量风险
-    '总监': ['high', 'mid'],
-    'CEO': ['high'],
+    '信用审核专员': ['all'],  # 全量风险初审
+    '财务审批主管': ['high', 'mid'],
+    '集团财务总监 / 最终审批人': ['high'],
 }
 
 

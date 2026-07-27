@@ -26,7 +26,7 @@ function highlightEvidence(text: string, evidence?: string) {
   </Text>
 }
 
-export default function ReportView ({ report, onReset, jobId }: { report: Report; onReset?: ()=>void; jobId?: string }) {
+export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow=true, showVersionCompare=true }: { report: Report; onReset?: ()=>void; jobId?: string; showLegacyWorkflow?:boolean; showVersionCompare?:boolean }) {
   const { role } = useRole()
   const [transOpen, setTransOpen] = useState(false)
   const [exporting, setExporting] = useState<string>('')
@@ -122,7 +122,7 @@ export default function ReportView ({ report, onReset, jobId }: { report: Report
     if (focusClauseId && r.clause_id === focusClauseId) return 'row-role-hl'
     return ''
   }
-  const canAct = ['法务','信审人员','总监','CEO','管理员'].includes(role)
+  const canAct = ['信用审核专员','财务审批主管','集团财务总监 / 最终审批人'].includes(role)
   const openAction = (risk: Risk) => {
     setActionRisk(risk); setActionType('adopt'); setActionReason(''); setEditedSuggestion(risk.suggestion || ''); setSimilarCases([])
     if (!rules.length) api.rules().then(result => setRules(result.rules)).catch(() => {})
@@ -167,7 +167,7 @@ export default function ReportView ({ report, onReset, jobId }: { report: Report
           <Button icon={<FileWordOutlined/>} loading={exporting.startsWith('bilingual')} onClick={()=>exportWord('bilingual', activeLang)} disabled={!jid}>导出双语稿</Button>
           <Select size="small" value={activeLang} style={{width:110}} onChange={setActiveLang}
             options={[{value:'en',label:'英语'},{value:'vi',label:'越南语'},{value:'ja',label:'日语'},{value:'es',label:'西语'}]} />
-          <Button icon={<SwapOutlined/>} onClick={()=>{setCompareOpen(true);setComparison(null)}} disabled={!jid}>版本对比</Button>
+          {showVersionCompare&&<Button icon={<SwapOutlined/>} onClick={()=>{setCompareOpen(true);setComparison(null)}} disabled={!jid}>版本对比</Button>}
           <Button icon={<TranslationOutlined/>} onClick={()=>setTransOpen(true)} disabled={!jid}>翻译</Button>
           <Button onClick={()=>downloadText(`${report.filename}.json`, JSON.stringify(report,null,2),'application/json')}>导出 JSON</Button>
           {onReset && <Button icon={<ReloadOutlined/>} onClick={onReset}>重新审查</Button>}
@@ -236,16 +236,16 @@ export default function ReportView ({ report, onReset, jobId }: { report: Report
         ]}/>
       </Card>
 
-      <CaseWorkflowPanel jobId={jid} />
+      {showLegacyWorkflow && <CaseWorkflowPanel jobId={jid} />}
 
       <TranslateModal jobId={jid} open={transOpen} onClose={()=>setTransOpen(false)} onTranslated={(lang)=>setActiveLang(lang)} />
       <Modal title={`处置风险 ${actionRisk?.rule_id||''}`} open={!!actionRisk} onCancel={()=>setActionRisk(null)} onOk={submitAction} okText="确认提交" confirmLoading={actionBusy}>
         <Space direction="vertical" style={{width:'100%'}}><Button.Group><Button type={actionType==='adopt'?'primary':'default'} onClick={()=>setActionType('adopt')}>采纳建议</Button><Button type={actionType==='ignore'?'primary':'default'} onClick={()=>setActionType('ignore')}>忽略风险</Button><Button type={actionType==='edit'?'primary':'default'} onClick={()=>setActionType('edit')}>编辑后采纳</Button></Button.Group>{similarCases.length>0&&<Alert type="info" showIcon message={`相似已采纳案例（${similarCases.length}）`} description={<List size="small" dataSource={similarCases} renderItem={item=><List.Item><Text>{item.suggested_text || item.evidence || '历史案例'}</Text></List.Item>}/>}/>} {actionType==='edit'&&<><Select value={editedSuggestion || undefined} placeholder="选择该规则的红线改写模板" options={rules.filter(rule=>rule.id===actionRisk?.rule_id&&!!rule.template).map(rule=>({value:rule.template,label:rule.template}))} onChange={setEditedSuggestion}/><Input.TextArea value={editedSuggestion} onChange={e=>setEditedSuggestion(e.target.value)} placeholder="可在模板基础上编辑建议替换文本" rows={4}/></>}<Input.TextArea value={actionReason} onChange={e=>setActionReason(e.target.value)} placeholder="必填：说明处置依据、审批例外或业务原因" rows={4}/></Space>
       </Modal>
-      <Modal title="合同版本对比" open={compareOpen} onCancel={()=>setCompareOpen(false)} onOk={compareVersions} okText="开始对比">
+      {showVersionCompare&&<Modal title="合同版本对比" open={compareOpen} onCancel={()=>setCompareOpen(false)} onOk={compareVersions} okText="开始对比">
         <Input value={baselineId} onChange={event=>setBaselineId(event.target.value)} placeholder="输入上一版本的任务 ID" />
         {comparison && <div style={{marginTop:16}}><Text>新增风险：{comparison.new_risks?.join('、')||'无'}</Text><br/><Text>已消除风险：{comparison.resolved_risks?.join('、')||'无'}</Text><br/><Text>仍存在风险：{comparison.persisting_risks?.join('、')||'无'}</Text><br/><Text>变更条款：{comparison.changed_clauses?.join('、')||'无'}</Text>{comparison.review_scope?.mode==='incremental'&&<><br/><Tag color="blue">增量复审</Tag><Text> 实际复审变更条款 {comparison.review_scope.changed_clause_ids?.length||0} 条，附带上下文 {comparison.review_scope.context_clause_ids?.length||0} 条。</Text></>}</div>}
-      </Modal>
+      </Modal>}
     </>
   )
 }

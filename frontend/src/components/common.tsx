@@ -2,6 +2,14 @@ import type { Risk } from '../types'
 import type { Role } from '../context/RoleContext'
 import { CheckCircleTwoTone, ExclamationCircleTwoTone, CloseCircleTwoTone } from '@ant-design/icons'
 
+/** Technical RBAC identifiers never leak into the business-facing UI. */
+export const approvalRoleLabel = (role?: string) => ({
+  admin: '集团财务总监 / 最终审批人',
+  director: '财务审批主管',
+  reviewer: '信用审核专员',
+  business: '业务申请人',
+}[role || ''] || role || '未指定')
+
 export const sev2Icon: Record<string, any> = {
   high: <CloseCircleTwoTone twoToneColor="#cf1322" />,
   mid: <ExclamationCircleTwoTone twoToneColor="#d48806" />,
@@ -21,7 +29,7 @@ export const riskTableCols = [
   { title: '风险证据', dataIndex: 'evidence', width: 320, render: (v:string)=> <span className="risk-cell-text">{v || '—'}</span> },
   { title: '数值依据', dataIndex: 'numeric_note', width: 190, render:(v:string)=>
     v ? <span className="risk-cell-text" style={{color:'#722ed1'}}>{v}</span> : <span style={{color:'#ccc'}}>—</span> },
-  { title: '规则裁决', width: 220, render:(_:any,r:Risk)=> <span className="risk-cell-text">{r.decision === 'requires_approval' ? `需 ${r.approval_required?.toUpperCase()} 审批` : r.decision === 'needs_human_confirmation' ? '待补材料/人工确认' : '已确认风险'}{r.facts && Object.keys(r.facts).length ? `；事实：${Object.entries(r.facts).filter(([,value])=>value!==null&&value!==undefined&&value!=='').map(([key,value])=>`${key}=${value}`).join('，')}` : ''}</span> },
+  { title: '规则裁决', width: 220, render:(_:any,r:Risk)=> <span className="risk-cell-text">{r.decision === 'requires_approval' ? `需${approvalRoleLabel(r.approval_required)}审批` : r.decision === 'needs_human_confirmation' ? '待补材料/人工确认' : '已确认风险'}{r.facts && Object.keys(r.facts).length ? `；事实：${Object.entries(r.facts).filter(([,value])=>value!==null&&value!==undefined&&value!=='').map(([key,value])=>`${key}=${value}`).join('，')}` : ''}</span> },
   { title: '修改建议', dataIndex: 'suggestion', width: 380, render:(v:string)=> <span className="risk-cell-text">{v || '—'}</span> }
 ]
 
@@ -48,15 +56,15 @@ export const downloadText = (name: string, text: string, type='text/plain') => {
 /* ============= 评审角色过滤 / 高亮 ============= */
 /** 当前角色下该风险是否可见 */
 export const roleRiskVisible = (r: Risk, role: Role): boolean => {
-  if (role === 'CEO') return r.severity === 'high'
-  if (role === '总监') return r.severity === 'high' || r.severity === 'mid'
-  if (role === '业务人员') return false
+  if (role === '集团财务总监 / 最终审批人') return r.severity === 'high'
+  if (role === '财务审批主管') return r.severity === 'high' || r.severity === 'mid'
+  if (role === '业务申请人') return false
   return true
 }
 
 /** 当前角色下该风险是否需要高亮 */
 export const roleRiskHighlight = (r: Risk, role: Role): boolean => {
-  if (role === 'CEO') return r.severity === 'high'
-  if (role === '总监') return r.severity === 'high'
+  if (role === '集团财务总监 / 最终审批人') return r.severity === 'high'
+  if (role === '财务审批主管') return r.severity === 'high'
   return false
 }

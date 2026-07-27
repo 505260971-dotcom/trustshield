@@ -4,7 +4,7 @@ import { CheckOutlined, CloudUploadOutlined, PaperClipOutlined, SendOutlined } f
 import { api } from '../services/api'
 import { useAuth } from '../context/AuthContext'
 import type { ApprovalItem, MaterialRequest } from '../types'
-import { fmtTime } from './common'
+import { approvalRoleLabel, fmtTime } from './common'
 
 const { Text } = Typography
 
@@ -18,7 +18,7 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
   const [busy, setBusy] = useState(false)
   const [oaFlowId, setOaFlowId] = useState('')
   const [oaFlow, setOaFlow] = useState<any>(null)
-  const [oaRole, setOaRole] = useState('法务')
+  const [oaRole, setOaRole] = useState('信用审核专员')
   const [oaDecision, setOaDecision] = useState('采纳')
   const [oaNote, setOaNote] = useState('')
   const [attachments, setAttachments] = useState<any[]>([])
@@ -124,7 +124,7 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
         <Alert type={approvals.some(x => x.status === 'pending') ? 'warning' : 'success'} showIcon
           message={approvals.some(x => x.status === 'pending') ? '存在待审批的合同例外，未完成前不可导出可签约修订稿。' : '所有必需的合同例外审批均已有决定。'} />
         <List size="small" style={{ marginTop: 12 }} dataSource={approvals} renderItem={item => <List.Item actions={canDecide(item) && item.status === 'pending' ? [<Button size="small" icon={<SendOutlined />} onClick={() => { setSelectedApproval(item); setNote('') }}>处理审批</Button>] : []}>
-          <List.Item.Meta title={<Space><Tag color={item.status === 'approved' ? 'green' : item.status === 'pending' ? 'orange' : 'red'}>{item.status}</Tag><Text strong>需 {item.required_role.toUpperCase()} 审批</Text></Space>}
+          <List.Item.Meta title={<Space><Tag color={item.status === 'approved' ? 'green' : item.status === 'pending' ? 'orange' : 'red'}>{item.status}</Tag><Text strong>需{approvalRoleLabel(item.required_role)}审批</Text></Space>}
             description={item.decision_note || `创建于 ${fmtTime(item.created_at)}`} />
         </List.Item>} />
       </>}
@@ -160,7 +160,7 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
       {oaFlowId && <Space direction="vertical" style={{width:'100%'}}>
         <Text>流程号：<Text code>{oaFlowId}</Text> · 状态 <Tag color="blue">{oaFlow?.status||'—'}</Tag></Text>
         <Space wrap>
-          <Select value={oaRole} style={{width:120}} onChange={setOaRole} options={['法务','总监','CEO'].map(x=>({value:x,label:x}))}/>
+          <Select value={oaRole} style={{width:220}} onChange={setOaRole} options={['信用审核专员','财务审批主管','集团财务总监 / 最终审批人'].map(x=>({value:x,label:x}))}/>
           <Select value={oaDecision} style={{width:120}} onChange={setOaDecision} options={['采纳','驳回','要求修改'].map(x=>({value:x,label:x}))}/>
           <Input style={{width:220}} placeholder="决策意见" value={oaNote} onChange={e=>setOaNote(e.target.value)}/>
           <Button loading={busy} onClick={submitOaDecision}>提交角色决策</Button>
@@ -175,7 +175,7 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
       </Space>}
     </Card>
 
-    <Modal title={`处理 ${selectedApproval?.required_role?.toUpperCase() || ''} 审批`} open={!!selectedApproval} onCancel={() => setSelectedApproval(null)} footer={<Space><Button onClick={() => setSelectedApproval(null)}>取消</Button><Button danger loading={busy} onClick={() => decide('rejected')}>驳回</Button><Button loading={busy} onClick={() => decide('changes_requested')}>要求改稿</Button><Button type="primary" loading={busy} onClick={() => decide('approved')}>批准例外</Button></Space>}>
+    <Modal title={`处理${approvalRoleLabel(selectedApproval?.required_role)}审批`} open={!!selectedApproval} onCancel={() => setSelectedApproval(null)} footer={<Space><Button onClick={() => setSelectedApproval(null)}>取消</Button><Button danger loading={busy} onClick={() => decide('rejected')}>驳回</Button><Button loading={busy} onClick={() => decide('changes_requested')}>要求改稿</Button><Button type="primary" loading={busy} onClick={() => decide('approved')}>批准例外</Button></Space>}>
       <Input.TextArea rows={4} value={note} onChange={event => setNote(event.target.value)} placeholder="必填：审批依据、边界或改稿要求" />
     </Modal>
     <Modal title="确认待补材料" open={!!selectedMaterial} onCancel={() => setSelectedMaterial(null)} onOk={resolve} confirmLoading={busy} okText="确认完成"><Input.TextArea rows={4} value={note} onChange={event => setNote(event.target.value)} placeholder="必填：已补充的材料、附件或核验结论" /></Modal>

@@ -13,7 +13,7 @@ from app.services.parse import parse_contract
 
 
 DATA = os.path.join(
-    os.path.dirname(__file__), '..', '..', '..', '数据包-信审与合同评审', '2）合同与订单样本'
+    os.path.dirname(__file__), '..', '..', 'docs', '00-命题与数据', '数据包-信审与合同评审', '2）合同与订单样本'
 )
 
 

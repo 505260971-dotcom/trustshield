@@ -18,7 +18,7 @@ export default function DashboardPage ({ refreshKey, onCreate, onCases }: { refr
   const maxFreq = Math.max(1, ...topRules.map(([,v])=>v as number))
   return (
     <>
-      <div className="page-intro"><div><Typography.Title level={3}>合同评审协作台</Typography.Title><Text type="secondary">提交合同、分配法务、处理风险并留存完整处置记录。</Text></div><Space><Button icon={<UnorderedListOutlined/>} onClick={onCases}>查看案件</Button><Button type="primary" icon={<FileAddOutlined/>} onClick={onCreate}>发起评审</Button></Space></div>
+      <div className="page-intro"><div><Typography.Title level={3}>合同评审协作台</Typography.Title><Text type="secondary">提交合同、分配信用审核专员、处理风险并留存完整处置记录。</Text></div><Space><Button icon={<UnorderedListOutlined/>} onClick={onCases}>查看案件</Button><Button type="primary" icon={<FileAddOutlined/>} onClick={onCreate}>发起评审</Button></Space></div>
       <Row gutter={[16,16]}>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title="我的待办" value={s.my_open} prefix={<AuditOutlined/>}/></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title="待领取案件" value={s.unassigned} prefix={<TeamOutlined/>}/></Card></Col>

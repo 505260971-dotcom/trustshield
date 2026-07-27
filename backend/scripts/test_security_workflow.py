@@ -21,9 +21,13 @@ from app.services.security import decrypt_json, issue_token
 store.init_db()
 admin=store.authenticate('admin','AdminPassword2026!')
 assert admin and admin['role']=='admin' and issue_token(admin)
-credit = store.create_credit_case('测试客户', {'max_credit_amount': 1000000, 'max_payment_days': 60, 'min_prepayment_ratio': 30, 'allowed_payment_methods': ['bank_transfer']}, '单元测试信审', admin)
-store.submit_credit_case(credit['case_id'], admin)
-credit = store.decide_credit_case(credit['case_id'], 'approved', '单元测试批准', admin)
+reviewer = store.create_user('reviewer', '信用审核专员', 'reviewer', 'ReviewerPassword2026!')
+director = store.create_user('director', '财务审批主管', 'director', 'DirectorPassword2026!')
+credit = store.create_credit_case('测试客户', {'max_credit_amount': 1000000, 'max_payment_days': 60, 'min_prepayment_ratio': 30, 'allowed_payment_methods': ['bank_transfer']}, '单元测试信审', reviewer)
+store.submit_credit_case(credit['case_id'], reviewer)
+credit = store.decide_credit_case(credit['case_id'], 'approved', '主管复核', director)
+assert credit['status'] == 'pending_final'
+credit = store.decide_credit_case(credit['case_id'], 'approved', '最终批核', admin)
 store.create_pending('review-1','sample.docx','',admin, credit_case=credit)
 report={'filename':'sample.docx','summary':{'n_clauses':1,'n_risks':1,'high':1,'mid':0,'low':0,'overall_level':'阻断'},
         'contract_fields':{},'masked_entities':1,'clauses':[],'steps':[],
