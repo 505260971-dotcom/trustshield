@@ -82,8 +82,14 @@ def assess_customer_binding(contract_fields: dict[str, Any], customer_name: str)
     return []
 
 
-def assess_credit_compliance(clauses: list[dict], conditions: dict[str, Any]) -> list[dict]:
-    """Return non-overridable findings when contract terms are worse than credit terms."""
+def assess_credit_compliance(clauses: list[dict], conditions: dict[str, Any], exposure_snapshot: dict[str, Any] | None=None) -> list[dict]:
+    """Return non-overridable findings when contract terms are worse than credit terms.
+
+    ``exposure_snapshot`` is an encrypted-at-rest CRM/ERP point-in-time input
+    supplied by the credit module.  It lets the contract guard enforce the
+    documented total-credit rule instead of comparing only this one contract's
+    face value with the approved cap.
+    """
     text = '\n'.join(str(item.get('text') or '') for item in clauses or [])
     findings: list[dict] = []
     term_days = [int(match.group(1)) for pattern in _TERM_PATTERNS for match in pattern.finditer(text)]
@@ -113,8 +119,28 @@ def assess_credit_compliance(clauses: list[dict], conditions: dict[str, Any]) ->
     cap = conditions.get('max_credit_amount', 0)
     amounts = [(float(raw.replace(',', '')), currency.upper()) for raw, currency in _AMOUNT.findall(text)]
     matching = [amount for amount, currency in amounts if currency in {conditions.get('currency', 'CNY'), '人民币', '元', 'RMB', 'CNY'}]
-    if cap and matching and max(matching) > cap:
-        actual = max(matching)
-        findings.append(_risk('CREDIT_EXPOSURE', f'该客户信审单笔/敞口上限为 {cap:g} {conditions.get("currency", "CNY")}',
-                              f'合同金额 {actual:g}', f'合同金额 {actual:g} > 已生效信审上限 {cap:g}', {'contract_amount': actual, 'max_credit_amount': cap, 'currency': conditions.get('currency', 'CNY')}))
+    contract_amount = max(matching, default=0)
+    snapshot = exposure_snapshot or {}
+    snapshot_currency = str(snapshot.get('currency') or conditions.get('currency') or 'CNY').upper()
+    same_currency = snapshot_currency == str(conditions.get('currency') or 'CNY').upper()
+    existing_exposure = 0.0
+    if same_currency:
+        try:
+            existing_exposure = max(0, float(snapshot.get('current_receivables') or 0)) + max(0, float(snapshot.get('booked_order_amount') or 0))
+        except (TypeError, ValueError):
+            existing_exposure = 0.0
+    total_exposure = existing_exposure + contract_amount
+    if cap and contract_amount and (contract_amount > cap or total_exposure > cap):
+        evidence = f'合同金额 {contract_amount:g}'
+        if existing_exposure:
+            evidence += f'；CRM/ERP 既有敞口 {existing_exposure:g}；合计 {total_exposure:g}'
+        findings.append(_risk('CREDIT_EXPOSURE', f'该客户信审总敞口上限为 {cap:g} {conditions.get("currency", "CNY")}', evidence,
+                              f'合同后总敞口 {total_exposure:g} > 已生效信审上限 {cap:g}', {'contract_amount': contract_amount, 'existing_exposure': existing_exposure, 'total_exposure': total_exposure, 'max_credit_amount': cap, 'currency': conditions.get('currency', 'CNY')}))
+    try:
+        overdue_days = int(snapshot.get('overdue_days') or 0)
+    except (TypeError, ValueError):
+        overdue_days = 0
+    if overdue_days > 30:
+        findings.append(_risk('CREDIT_OVERDUE_LOCK', '同一客户逾期超过 30 天未付款时，系统应锁定继续入单、出货或走模',
+                              f'CRM/ERP 快照显示最长逾期 {overdue_days} 天', f'客户逾期 {overdue_days} 天，超过制度锁定阈值 30 天', {'overdue_days': overdue_days, 'source': 'credit_exposure_snapshot'}))
     return findings

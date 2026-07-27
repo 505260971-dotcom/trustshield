@@ -33,15 +33,24 @@ export type Stats = {
 }
 export type HealthInfo = { ollama: boolean; llm: boolean }
 
-export type CreditConditions = { max_credit_amount:number; currency:string; max_payment_days:number; min_prepayment_ratio:number; allowed_payment_methods:string[]; allow_vmi_jit:boolean; valid_from?:number; valid_to?:number }
-export type CreditCase = { case_id:string; customer_name:string; version:number; status:'draft'|'pending_approval'|'approved'|'rejected'|'superseded'; conditions:CreditConditions; request_note:string; decision_note:string; created_at:number; submitted_at?:number; decided_at?:number }
-export type ReviewRequest = { business_type?: string; credit_case_id?:string; parent_job_id?: string; assignee_id?: string; priority?: string; due_at?: number; request_note?: string }
+export type CreditConditions = { max_credit_amount:number; currency:string; max_payment_days:number; min_prepayment_ratio:number; allowed_payment_methods:string[]; allow_vmi_jit:boolean; valid_from?:number; valid_to?:number; available_credit_amount?:number; exposure_at_assessment?:number }
+export type CreditCase = { case_id:string; customer_name:string; version:number; status:'draft'|'pending_director'|'pending_final'|'approved'|'rejected'|'superseded'; conditions:CreditConditions; request_note:string; business_type?:string; director_note?:string; decision_note:string; created_at:number; submitted_at?:number; director_at?:number; decided_at?:number }
+export type CreditDocument = { document_id:string; case_id:string; document_type:'financial_report'|'credit_report'|'trade_history'|'application'|'approval_evidence'|'other'; original_name:string; content_hash:string; uploaded_by?:string; created_at:number }
+export type CreditExposure = { snapshot_id?:string; source?:string; captured_at?:number; payload?:{current_receivables:number;booked_order_amount:number;overdue_amount:number;overdue_days:number;currency?:string;as_of?:number;note?:string}|null }
+export type CreditAssessment = { assessment_id?:string; case_id?:string; status:'none'|'running'|'done'|'error'; model_version?:string; policy_version?:string; report?:any; evidence?:any[]; error?:string; created_at?:number; completed_at?:number }
+export type ReviewRequest = { business_type?: string; credit_case_id?:string; parent_job_id?: string; assignee_id?: string; priority?: string; due_at?: number; request_note?: string; case_id?:string; document_role?:string }
 export type TeamMember = { id: string; display_name: string; role: string }
 export type CaseItem = {
   case_id: string; job_id: string; filename: string; workflow_status: string; review_status: string
   priority: 'low'|'normal'|'high'|'urgent'; due_at?: number; request_note?: string; created_at: number; updated_at: number
   assigned_to?: string; assignee_name?: string; requester_name?: string; overall_level?: string; n_clauses: number; n_risks: number; high: number; mid: number; low: number
 }
+
+export type WorkItem = { task_id:string; case_id:string; task_type:string; title:string; detail:string; status:string; due_at?:number; created_at:number; customer_name:string; current_stage:string; priority:string; filename?:string }
+export type CaseDocument = { document_id:string; job_id?:string; original_name:string; document_role:string; version_label:string; review_status?:string; overall_level?:string; n_risks?:number; high?:number; mid?:number; low?:number; created_at:number }
+export type CaseEvent = { event_id:string; event_type:string; message:string; actor_id?:string; created_at:number }
+export type CaseCenterItem = { case_id:string; customer_name:string; business_type:string; workflow_status:string; current_stage:string; priority:string; due_at?:number; request_note?:string; created_at:number; updated_at:number; requester_name?:string; assignee_name?:string; filename?:string; job_id?:string; overall_level?:string; document_count:number; open_tasks:number; credit_case_id?:string }
+export type CaseCenterDetail = CaseCenterItem & { assigned_to?:string; documents:CaseDocument[]; tasks:WorkItem[]; events:CaseEvent[] }
 
 export const sevColor: Record<string,string> = { high: 'red', mid: 'orange', low: 'blue' }
 

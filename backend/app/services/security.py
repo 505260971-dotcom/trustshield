@@ -17,18 +17,32 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from ..config import ACCESS_TOKEN_MINUTES, AUTH_SECRET, DATA_ENCRYPTION_KEY
 
-ROLES = ('admin', 'credit', 'legal', 'director', 'ceo', 'business')
+"""The demo follows Dongjiang's documented approval ladder:
+business applicant -> credit reviewer -> finance approval manager -> group CFO.
+
+`admin` intentionally remains the technical superuser because it also owns
+system configuration, but is presented to users as the Group CFO / final
+approver rather than a generic administrator.
+"""
+ROLES = ('admin', 'director', 'reviewer', 'business')
 ROLE_LABELS = {
-    'admin': '管理员', 'credit': '信审人员', 'legal': '法务',
-    'director': '总监', 'ceo': 'CEO', 'business': '业务人员',
+    'admin': '集团财务总监 / 最终审批人',
+    'director': '财务审批主管',
+    'reviewer': '信用审核专员',
+    'business': '业务申请人',
 }
 PERMISSIONS = {
     'admin': {'*'},
-    'credit': {'credit:create', 'credit:read', 'credit:manage'},
-    'legal': {'review:create', 'review:read', 'review:action', 'review:manage', 'export', 'credit:read'},
-    'director': {'review:read', 'review:action', 'review:manage', 'export', 'credit:read'},
-    'ceo': {'review:read', 'review:action', 'review:manage', 'export', 'credit:read'},
-    'business': {'review:create', 'review:read', 'credit:read'},
+    # The credit reviewer investigates, makes recommendations and performs
+    # contract first review.  It may never approve its own credit decision.
+    'reviewer': {'credit:create', 'credit:read', 'credit:manage',
+                 'review:create', 'review:read', 'review:action', 'review:manage', 'export'},
+    # The finance approval manager performs the second-level credit approval
+    # and contract-exception approval; Group CFO handles final exceptions.
+    'director': {'review:read', 'review:action', 'review:manage', 'export', 'credit:read', 'credit:approve'},
+    # The applicant can open a credit application, but cannot edit the
+    # assessed terms or send it into the finance approval chain.
+    'business': {'review:create', 'review:read', 'credit:create', 'credit:read'},
 }
 
 def password_hash(password: str) -> str:

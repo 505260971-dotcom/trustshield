@@ -28,9 +28,20 @@ app.include_router(auth_router)
 # Short-lived runtime state only; sensitive report and mapping are persisted encrypted.
 JOBS: dict[str, dict] = {}
 TJOBS: dict[str, dict] = {}
+CREDIT_JOBS: dict[str, dict] = {}
 ALLOWED_CONTRACT = {'.docx','.pdf','.txt','.xlsx','.xls','.png','.jpg','.jpeg','.webp','.bmp'}
 ALLOWED_ATTACHMENT = ALLOWED_CONTRACT
 EXPORT_MODES = {'revised', 'plain', 'bilingual'}
+
+
+def _assert_credit_access(case_id: str, user: dict) -> dict:
+    """Business applicants may access only the credit cases they created."""
+    item = store.get_credit_case(case_id)
+    if not item:
+        raise HTTPException(404, '信审案件不存在')
+    if user.get('role') == 'business' and item.get('created_by') != user.get('id'):
+        raise HTTPException(403, '无权访问该信审案件')
+    return item
 
 @app.on_event('startup')
 def _startup():
@@ -93,19 +104,23 @@ async def rule_version_publish(version: str, user=Depends(require('admin:cases')
 # Credit review is deliberately separate from contract review.  A contract can
 # read a published decision but cannot create, alter, or approve one.
 @app.get('/api/credit/decisions')
-async def credit_decisions(active_only: bool=True, user=Depends(require('credit:read'))):
-    return {'items': store.list_credit_cases(active_only=active_only)}
+async def credit_decisions(customer: str='', active_only: bool=True, user=Depends(require('credit:read'))):
+    # Business users select a decision only for the customer in the case they
+    # are creating; they must not browse the enterprise-wide credit ledger.
+    if user.get('role') == 'business' and not customer.strip():
+        return {'items': []}
+    return {'items': store.list_credit_cases(customer, active_only=active_only)}
 
 @app.get('/api/credit/cases')
 async def credit_cases(customer: str='', user=Depends(require('credit:read'))):
     if user.get('role') == 'business':
-        return {'items': store.list_credit_cases(customer, active_only=True)}
+        return {'items': store.list_credit_cases(customer, created_by=user.get('id'))}
     return {'items': store.list_credit_cases(customer)}
 
 @app.post('/api/credit/cases')
 async def credit_case_create(body: dict, user=Depends(require('credit:create'))):
     try:
-        result = store.create_credit_case(body.get('customer_name', ''), body.get('conditions') or {}, body.get('request_note', ''), user)
+        result = store.create_credit_case(body.get('customer_name', ''), body.get('conditions') or {}, body.get('request_note', ''), user, body.get('business_type', '一般'))
     except ValueError as e:
         raise HTTPException(400, str(e))
     store.audit(user, 'credit.create', 'credit_case', result['case_id'], {'customer': result['customer_name'], 'version': result['version']})
@@ -114,7 +129,12 @@ async def credit_case_create(body: dict, user=Depends(require('credit:create')))
 @app.patch('/api/credit/cases/{case_id}')
 async def credit_case_update(case_id: str, body: dict, user=Depends(require('credit:manage'))):
     try:
-        result = store.update_credit_case(case_id, body.get('conditions') or {}, body.get('request_note', ''), user)
+        current = _assert_credit_access(case_id, user)
+        conditions = body['conditions'] if 'conditions' in body else current['conditions']
+        request_note = body['request_note'] if 'request_note' in body else current.get('request_note', '')
+        result = store.update_credit_case(case_id, conditions, request_note, user)
+        if 'business_type' in body:
+            result = store.set_credit_business_type(case_id, body.get('business_type'), user)
     except ValueError as e:
         raise HTTPException(400, str(e))
     store.audit(user, 'credit.update', 'credit_case', case_id)
@@ -128,10 +148,205 @@ async def credit_case_submit(case_id: str, user=Depends(require('credit:manage')
     return result
 
 @app.post('/api/credit/cases/{case_id}/decision')
-async def credit_case_decision(case_id: str, body: dict, user=Depends(require('credit:manage'))):
+async def credit_case_decision(case_id: str, body: dict, user=Depends(require('credit:approve'))):
     try: result = store.decide_credit_case(case_id, body.get('decision', ''), body.get('note', ''), user)
     except ValueError as e: raise HTTPException(400, str(e))
     store.audit(user, 'credit.decision', 'credit_case', case_id, {'decision': body.get('decision')})
+    return result
+
+
+@app.get('/api/credit/model')
+async def credit_model(user=Depends(require('credit:read'))):
+    return store.get_credit_model()
+
+
+@app.get('/api/credit/cases/{case_id}/documents')
+async def credit_documents(case_id: str, user=Depends(require('credit:read'))):
+    _assert_credit_access(case_id, user)
+    return {'items': store.list_credit_documents(case_id)}
+
+
+@app.post('/api/credit/cases/{case_id}/documents')
+async def credit_document_upload(case_id: str, file: UploadFile=File(...), document_type: str=Form('other'), user=Depends(require('credit:create'))):
+    _assert_credit_access(case_id, user)
+    ext = os.path.splitext(file.filename or '')[1].lower()
+    if ext not in ALLOWED_ATTACHMENT:
+        raise HTTPException(400, '信审材料仅支持 DOCX/PDF/XLSX/TXT/PNG/JPG')
+    safe_name = os.path.basename(file.filename or 'credit-document')
+    if not safe_name or len(safe_name) > 255:
+        raise HTTPException(400, '信审材料文件名无效')
+    folder = os.path.join(UPLOAD_DIR, 'credit-materials', case_id)
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f'{uuid.uuid4().hex}_{safe_name}')
+    await _write_upload(file, path)
+    try:
+        item = store.add_credit_document(case_id, document_type, safe_name, path, user)
+    except ValueError as exc:
+        if os.path.exists(path):
+            os.remove(path)
+        raise HTTPException(400, str(exc))
+    store.audit(user, 'credit.document_upload', 'credit_case', case_id, {'document_id': item['document_id'], 'document_type': document_type})
+    return item
+
+
+@app.get('/api/credit/cases/{case_id}/documents/{document_id}/download')
+async def credit_document_download(case_id: str, document_id: str, user=Depends(require('credit:read'))):
+    _assert_credit_access(case_id, user)
+    item = store.get_credit_document(case_id, document_id)
+    if not item or not os.path.isfile(item.get('stored_path') or ''):
+        raise HTTPException(404, '信审材料不存在')
+    return FileResponse(item['stored_path'], filename=item['original_name'])
+
+
+@app.get('/api/credit/cases/{case_id}/exposure')
+async def credit_exposure_get(case_id: str, user=Depends(require('credit:read'))):
+    _assert_credit_access(case_id, user)
+    return store.latest_credit_exposure_snapshot(case_id) or {'payload': None}
+
+
+@app.post('/api/credit/cases/{case_id}/exposure')
+async def credit_exposure_save(case_id: str, body: dict, user=Depends(require('credit:manage'))):
+    _assert_credit_access(case_id, user)
+    try:
+        result = store.save_credit_exposure_snapshot(case_id, body, user, source=str(body.get('source') or 'manual'))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    store.audit(user, 'credit.exposure_snapshot', 'credit_case', case_id, {'source': result['source'], 'captured_at': result['captured_at']})
+    return result
+
+
+def _run_credit_assessment(assessment_id: str):
+    job = CREDIT_JOBS[assessment_id]
+    try:
+        from .graph.credit_graph import run_credit_assessment
+        case = store.get_credit_case(job['case_id'])
+        documents = [store.get_credit_document(job['case_id'], item['document_id']) for item in store.list_credit_documents(job['case_id'])]
+        documents = [item for item in documents if item]
+        exposure = store.latest_credit_exposure_snapshot(job['case_id'])
+        report, evidence = run_credit_assessment(
+            case, documents, (exposure or {}).get('payload'), store.get_credit_model(job['model_version']),
+            on_step=lambda step: CREDIT_JOBS[assessment_id]['steps'].append(step),
+        )
+        completed = store.finish_credit_assessment(assessment_id, report, evidence)
+        job.update(status='done', result=completed)
+    except Exception as exc:
+        try:
+            store.finish_credit_assessment(assessment_id, None, [], str(exc))
+        except Exception:
+            pass
+        job.update(status='error', error=str(exc)[:1000])
+
+
+@app.post('/api/credit/cases/{case_id}/assessments')
+async def credit_assessment_start(case_id: str, body: dict | None=None, user=Depends(require('credit:manage'))):
+    _assert_credit_access(case_id, user)
+    if not secure_runtime_ready():
+        raise HTTPException(503, '安全运行环境未就绪：请配置 AUTH_SECRET 与 DATA_ENCRYPTION_KEY')
+    try:
+        assessment = store.start_credit_assessment(case_id, user, str((body or {}).get('model_version') or ''))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    CREDIT_JOBS[assessment['assessment_id']] = {'status': 'running', 'case_id': case_id, 'model_version': assessment['model_version'], 'steps': [], 'result': None, 'error': ''}
+    threading.Thread(target=_run_credit_assessment, args=(assessment['assessment_id'],), daemon=True).start()
+    store.audit(user, 'credit.assessment_start', 'credit_assessment', assessment['assessment_id'], {'case_id': case_id, 'model_version': assessment['model_version']})
+    return assessment
+
+
+@app.get('/api/credit/cases/{case_id}/assessments/latest')
+async def credit_assessment_latest(case_id: str, user=Depends(require('credit:read'))):
+    _assert_credit_access(case_id, user)
+    return store.latest_credit_assessment(case_id) or {'status': 'none', 'report': None, 'evidence': []}
+
+
+@app.get('/api/credit/cases/{case_id}/assessments/{assessment_id}')
+async def credit_assessment_get(case_id: str, assessment_id: str, user=Depends(require('credit:read'))):
+    _assert_credit_access(case_id, user)
+    result = store.get_credit_assessment(assessment_id)
+    if not result or result.get('case_id') != case_id:
+        raise HTTPException(404, '信审评估不存在')
+    return result
+
+
+@app.get('/api/credit/cases/{case_id}/assessments/{assessment_id}/status')
+async def credit_assessment_status(case_id: str, assessment_id: str, user=Depends(require('credit:read'))):
+    _assert_credit_access(case_id, user)
+    job = CREDIT_JOBS.get(assessment_id)
+    if job and job.get('case_id') == case_id:
+        return {key: value for key, value in job.items() if key != 'result'}
+    result = store.get_credit_assessment(assessment_id)
+    if not result or result.get('case_id') != case_id:
+        raise HTTPException(404, '信审评估不存在')
+    return {'status': result['status'], 'steps': (result.get('report') or {}).get('steps', []), 'error': result.get('error', '')}
+
+
+@app.post('/api/credit/cases/{case_id}/assessments/{assessment_id}/apply')
+async def credit_assessment_apply(case_id: str, assessment_id: str, user=Depends(require('credit:manage'))):
+    current = _assert_credit_access(case_id, user)
+    assessment = store.get_credit_assessment(assessment_id)
+    if not assessment or assessment.get('case_id') != case_id or assessment.get('status') != 'done':
+        raise HTTPException(409, '尚无可应用的已完成信审评估')
+    result = assessment.get('report') or {}
+    analysis = result.get('assessment') or {}
+    if analysis.get('model_status') != 'ready_for_reviewer' or any(item.get('level') == 'high' for item in analysis.get('risk_flags') or []):
+        raise HTTPException(409, '评估存在材料缺失或高风险阻断，不能直接应用建议条件')
+    try:
+        updated = store.update_credit_case(case_id, analysis.get('recommendation') or current['conditions'], current.get('request_note', ''), user)
+        updated = store.set_credit_business_type(case_id, analysis.get('business_type') or current.get('business_type', '一般'), user)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    store.audit(user, 'credit.assessment_apply', 'credit_case', case_id, {'assessment_id': assessment_id, 'model_version': result.get('model_version')})
+    return updated
+
+# ---- Case centre: the primary OA surface ----
+@app.get('/api/workbench/tasks')
+async def workbench_tasks(limit: int=100, user=Depends(current_user)):
+    return {'items': store.my_work_items(user, limit)}
+
+@app.get('/api/case-center/cases')
+async def case_center_list(scope: str='all', limit: int=100, user=Depends(current_user)):
+    if scope not in {'all', 'mine', 'inbox'}:
+        raise HTTPException(400, 'scope 仅支持 all、mine 或 inbox')
+    return {'items': store.list_case_center(user, scope, limit)}
+
+@app.post('/api/case-center/cases')
+async def case_center_create(body: dict, user=Depends(require('review:create'))):
+    try:
+        credit_case_id = str(body.get('credit_case_id') or '').strip()
+        if credit_case_id:
+            credit = store.require_active_credit_case(credit_case_id)
+            if credit.get('customer_name') != str(body.get('customer_name') or '').strip():
+                raise ValueError('信审版本客户与合同案件客户不一致')
+        result = store.create_case_center(str(body.get('customer_name') or ''), str(body.get('business_type') or '一般'),
+                                          str(body.get('request_note') or ''), user, credit_case_id,
+                                          str(body.get('priority') or 'normal'), body.get('due_at'))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit(user, 'case.create', 'case', result['case_id'], {'customer': body.get('customer_name')})
+    return result
+
+@app.get('/api/case-center/cases/{case_id}')
+async def case_center_detail(case_id: str, user=Depends(current_user)):
+    result = store.get_case_center(case_id, user)
+    if not result:
+        raise HTTPException(404, '案件不存在')
+    return result
+
+@app.post('/api/case-center/cases/{case_id}/actions/{action}')
+async def case_center_action(case_id: str, action: str, body: dict, user=Depends(current_user)):
+    try:
+        result = store.transition_case(case_id, action, user, str(body.get('note') or ''), str(body.get('assignee_id') or ''))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit(user, f'case.{action}', 'case', case_id, {'note': str(body.get('note') or '')[:300]})
+    return result
+
+@app.post('/api/workbench/tasks/{task_id}/complete')
+async def workbench_task_complete(task_id: str, body: dict, user=Depends(current_user)):
+    try:
+        result = store.complete_task(task_id, user, str(body.get('note') or ''))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit(user, 'task.complete', 'task', task_id)
     return result
 
 def _safe_result(report: dict) -> dict:
@@ -152,13 +367,16 @@ def _run(path: str, job_id: str, created_at: float):
         from .graph.review_graph import run_review
         report=run_review(path,on_step=lambda s:JOBS[job_id]['steps'].append(s),business_type_hint=job.get('business_type',''),rule_snapshot=job.get('rule_snapshot'),parent_report=job.get('parent_report'))
         credit_case = job['credit_case']
+        exposure = store.latest_credit_exposure_snapshot(credit_case['case_id'])
         credit_risks = [
             *assess_customer_binding(report.get('contract_fields', {}), credit_case['customer_name']),
-            *assess_credit_compliance(report.get('clauses', []), credit_case['conditions']),
+            *assess_credit_compliance(report.get('clauses', []), credit_case['conditions'], (exposure or {}).get('payload')),
         ]
         report['credit_decision'] = {
             'case_id': credit_case['case_id'], 'customer_name': credit_case['customer_name'],
             'version': credit_case['version'], 'conditions': credit_case['conditions'],
+            'business_type': credit_case.get('business_type', '一般'),
+            'exposure_snapshot_at_review': (exposure or {}).get('payload'),
         }
         if credit_risks:
             report['risks'] = [*report.get('risks', []), *credit_risks]
@@ -199,20 +417,24 @@ def _review_metadata(assignee_id: str, priority: str, due_at: str, request_note:
     return {'assignee_id': assignee_id, 'priority': priority, 'due_at': due, 'request_note': request_note}
 
 @app.post('/api/review')
-async def review(file: UploadFile=File(...), business_type: str=Form(''), credit_case_id: str=Form(''), parent_job_id: str=Form(''), assignee_id: str=Form(''), priority: str=Form('normal'), due_at: str=Form(''), request_note: str=Form(''), user=Depends(require('review:create'))):
+async def review(file: UploadFile=File(...), business_type: str=Form(''), credit_case_id: str=Form(''), parent_job_id: str=Form(''), assignee_id: str=Form(''), priority: str=Form('normal'), due_at: str=Form(''), request_note: str=Form(''), case_id: str=Form(''), document_role: str=Form('main'), user=Depends(require('review:create'))):
     if not secure_runtime_ready(): raise HTTPException(503,'安全运行环境未就绪：请配置 AUTH_SECRET 与 DATA_ENCRYPTION_KEY')
     try: credit_case = store.require_active_credit_case(credit_case_id)
     except ValueError as e: raise HTTPException(409, str(e))
     metadata=_review_metadata(assignee_id,priority,due_at,request_note); job_id,path=_start_review(file,user); await _write_upload(file,path); created=time.time(); catalog=store.get_rule_version(); parent_report={}
+    if case_id:
+        existing = store.get_case_center(case_id, user)
+        if not existing:
+            raise HTTPException(404, '合同案件不存在或无权访问')
     if parent_job_id:
         _assert_case_access(parent_job_id, user); parent = store.get_review(parent_job_id)
         if not parent or parent.get('status') != 'done': raise HTTPException(400, '上一版本尚未完成，不能增量复审')
         parent_report = parent.get('report') or {}
-    case_id=store.create_pending(job_id,file.filename,path,user,business_type,parent_job_id=parent_job_id,rule_version=catalog['version'],credit_case=credit_case,**metadata)
-    JOBS[job_id]={'status':'running','steps':[],'result':None,'path':path,'filename':file.filename,'actor':user,'case_id':case_id,'business_type':business_type,'rule_version':catalog['version'],'rule_snapshot':catalog['rules'],'rules_by_id':{rule['id']:rule for rule in catalog['rules']},'parent_report':parent_report,'credit_case':credit_case}
+    resolved_case_id=store.create_pending(job_id,file.filename,path,user,business_type,parent_job_id=parent_job_id,rule_version=catalog['version'],credit_case=credit_case,case_id=case_id,document_role=document_role,**metadata)
+    JOBS[job_id]={'status':'running','steps':[],'result':None,'path':path,'filename':file.filename,'actor':user,'case_id':resolved_case_id,'business_type':business_type,'rule_version':catalog['version'],'rule_snapshot':catalog['rules'],'rules_by_id':{rule['id']:rule for rule in catalog['rules']},'parent_report':parent_report,'credit_case':credit_case}
     threading.Thread(target=_run,args=(path,job_id,created),daemon=True).start()
-    store.audit(user,'review.create','case',case_id,{'job_id':job_id,'filename':file.filename})
-    return {'job_id':job_id,'case_id':case_id}
+    store.audit(user,'review.create','case',resolved_case_id,{'job_id':job_id,'filename':file.filename})
+    return {'job_id':job_id,'case_id':resolved_case_id}
 
 @app.post('/api/review/batch')
 async def review_batch(files: list[UploadFile]=File(...), business_type: str=Form('一般'), credit_case_id: str=Form(''), assignee_id: str=Form(''), priority: str=Form('normal'), due_at: str=Form(''), request_note: str=Form(''), user=Depends(require('review:create'))):
@@ -406,7 +628,7 @@ async def export_docx_route(job_id: str, mode: str='revised', lang: str='', user
             raise HTTPException(409, '合同存在信审越界项，必须先更新信审并基于新版本重新复审，不能在合同端放行')
         pending = [x for x in store.list_approvals(job_id) if x['status'] != 'approved']
         if pending:
-            raise HTTPException(409, '存在未完成或未通过的 CEO/总监审批，不能导出可签约修订稿')
+            raise HTTPException(409, '存在未完成或未通过的主管/集团财务总监审批，不能导出可签约修订稿')
     report=rec.get('report') or {}; approved=store.list_findings(job_id)
     # Export only findings that a human has explicitly accepted or approved.
     accepted={'adopted','edited','approved'}; report={**report,'risks':[{'finding_id':x['finding_id'],'clause_id':x['clause_id'],'page':x['page'],'rule_id':x['rule_id'],'rule_baseline':x['baseline'],'severity':x['severity'],'level':x['level'],'evidence':x['evidence'],'numeric_note':x['numeric_note'],'suggestion':x['suggestion']} for x in approved if x['action_status'] in accepted]}
@@ -551,7 +773,7 @@ async def oa_flow_get(flow_id: str,user=Depends(require('review:read'))):
 
 @app.post('/api/integrations/oa/flow/{flow_id}/decision')
 async def oa_flow_decision(flow_id: str, body: dict, user=Depends(require('review:action'))):
-    role = str(body.get('role') or user.get('role') or '法务')
+    role = str(body.get('role') or user.get('role') or '信用审核专员')
     decision = str(body.get('decision') or '').strip()
     if not decision:
         raise HTTPException(400, '请填写决策（采纳/驳回/修改）')

@@ -1,75 +1,76 @@
 import { useEffect, useState } from 'react'
-import { Alert, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography, message } from 'antd'
-import { ApiOutlined, CheckCircleOutlined, PlusOutlined, SafetyCertificateOutlined, SendOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Descriptions, Divider, Drawer, Form, Input, InputNumber, List, Modal, Progress, Select, Space, Table, Tag, Typography, Upload, message } from 'antd'
+import { ApiOutlined, CheckCircleOutlined, CloudUploadOutlined, DatabaseOutlined, PlayCircleOutlined, PlusOutlined, SafetyCertificateOutlined, SendOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { api } from '../services/api'
 import { useAuth } from '../context/AuthContext'
-import type { CreditCase } from '../types'
+import type { CreditAssessment, CreditCase, CreditDocument, CreditExposure } from '../types'
 
 const { Text } = Typography
-const statusColor:Record<string,string>={draft:'default',pending_approval:'orange',approved:'green',rejected:'red',superseded:'purple'}
-const statusText:Record<string,string>={draft:'草稿',pending_approval:'待审批',approved:'已生效',rejected:'已拒绝',superseded:'已被新版本替代'}
-
-const toPayload=(v:any)=>({customer_name:v.customer_name,request_note:v.request_note||'',conditions:{max_credit_amount:v.max_credit_amount||0,currency:v.currency||'CNY',max_payment_days:v.max_payment_days||0,min_prepayment_ratio:v.min_prepayment_ratio||0,allowed_payment_methods:v.allowed_payment_methods||['bank_transfer'],allow_vmi_jit:!!v.allow_vmi_jit,valid_from:v.valid_from?dayjs(v.valid_from).valueOf()/1000:0,valid_to:v.valid_to?dayjs(v.valid_to).valueOf()/1000:0}})
+const statusColor:Record<string,string>={draft:'default',pending_director:'orange',pending_final:'purple',approved:'green',rejected:'red',superseded:'purple'}
+const statusText:Record<string,string>={draft:'待信用审核专员评估',pending_director:'待财务审批主管复核',pending_final:'待集团财务总监最终批核',approved:'已生效',rejected:'已拒绝',superseded:'已被新版本替代'}
+const documentTypes=[{value:'financial_report',label:'客户财报'},{value:'credit_report',label:'第三方信用报告'},{value:'trade_history',label:'交易/回款记录'},{value:'approval_evidence',label:'特别审批依据'},{value:'other',label:'其他材料'}]
+const toPayload=(v:any)=>({customer_name:v.customer_name,request_note:v.request_note||'',business_type:v.business_type||'一般',conditions:{max_credit_amount:v.max_credit_amount||0,currency:v.currency||'CNY',max_payment_days:v.max_payment_days||0,min_prepayment_ratio:v.min_prepayment_ratio||0,allowed_payment_methods:v.allowed_payment_methods||['bank_transfer'],allow_vmi_jit:!!v.allow_vmi_jit,valid_from:v.valid_from?dayjs(v.valid_from).valueOf()/1000:0,valid_to:v.valid_to?dayjs(v.valid_to).valueOf()/1000:0}})
+const money=(value:any,currency='CNY')=>`${Number(value||0).toLocaleString(undefined,{maximumFractionDigits:2})} ${currency}`
 
 export default function CreditPage(){
-  const { user }=useAuth(); const canManage=['admin','credit'].includes(user?.role||'')
+  const { user }=useAuth(); const canCreate=['admin','reviewer','business'].includes(user?.role||''); const canManage=['admin','reviewer'].includes(user?.role||''); const canDirector=user?.role==='director'; const canFinal=user?.role==='admin'
   const [items,setItems]=useState<CreditCase[]>([]); const [drawer,setDrawer]=useState(false); const [detail,setDetail]=useState<CreditCase|null>(null); const [form]=Form.useForm()
   const [crmOpen,setCrmOpen]=useState(false); const [crmForm]=Form.useForm(); const [crmHooks,setCrmHooks]=useState<any[]>([])
+  const [documents,setDocuments]=useState<CreditDocument[]>([]); const [assessment,setAssessment]=useState<CreditAssessment|null>(null); const [assessmentSteps,setAssessmentSteps]=useState<string[]>([]); const [exposure,setExposure]=useState<CreditExposure|null>(null); const [exposureForm]=Form.useForm(); const [documentType,setDocumentType]=useState('financial_report'); const [running,setRunning]=useState(false)
   const load=()=>api.creditCases().then(r=>setItems(r.items)).catch(e=>message.error('加载信审案件失败：'+e.message))
   const loadCrm=()=>api.crmListHooks().then(r=>setCrmHooks(r.items||[])).catch(()=>{})
   useEffect(()=>{load()},[])
-  const create=async()=>{try{const v=await form.validateFields(); await api.createCreditCase(toPayload(v)); message.success('已创建信审草稿；提交和批准后才能用于合同');setDrawer(false);form.resetFields();load()}catch(e:any){if(!e?.errorFields)message.error('创建失败：'+(e?.message||e))}}
-  const submit=async(item:CreditCase)=>{try{await api.submitCreditCase(item.case_id);message.success('已提交信审审批');load()}catch(e:any){message.error(e.message)}}
-  const decide=async(item:CreditCase,decision:'approved'|'rejected')=>{let note='';Modal.confirm({title:decision==='approved'?'确认生效该信审版本？':'拒绝该信审版本？',content:<Input.TextArea placeholder="必填：审批意见" onChange={e=>note=e.target.value}/>,onOk:async()=>{if(!note.trim())throw new Error('请填写审批意见');await api.decideCreditCase(item.case_id,{decision,note});message.success(decision==='approved'?'信审版本已生效':'信审版本已拒绝');load()}})}
-  const createCrmHook=async()=>{
-    try{
-      const v=await crmForm.validateFields()
-      const result=await api.crmCreateHook({customer_name:v.customer_name,crm_account_id:v.crm_account_id,request_note:v.request_note,create_draft:true})
-      message.success(`CRM 端口已接收 ${result.hook?.hook_id}；${result.credit_case?'已创建信审草稿':''}`)
-      setCrmOpen(false); crmForm.resetFields(); load(); loadCrm()
-    }catch(e:any){if(!e?.errorFields)message.error(e?.message||'CRM 试调失败')}
-  }
+  const refreshDetail=async(item:CreditCase)=>{const [docResult,assessmentResult,exposureResult]=await Promise.all([api.creditDocuments(item.case_id),api.latestCreditAssessment(item.case_id),api.creditExposure(item.case_id)]);setDocuments(docResult.items||[]);setAssessment(assessmentResult);setExposure(exposureResult); exposureForm.setFieldsValue(exposureResult.payload||{currency:item.conditions.currency||'CNY',current_receivables:0,booked_order_amount:0,overdue_amount:0,overdue_days:0})}
+  const openDetail=async(item:CreditCase)=>{setDetail(item);setAssessmentSteps([]);try{await refreshDetail(item)}catch(e:any){message.error('加载信审分析详情失败：'+e.message)}}
+  const create=async()=>{try{const v=await form.validateFields();await api.createCreditCase(toPayload(v));message.success(canManage?'已创建信审草稿，可上传材料并运行量化评估':'申请已发起，等待信用审核专员评估');setDrawer(false);form.resetFields();load()}catch(e:any){if(!e?.errorFields)message.error('创建失败：'+(e?.message||e))}}
+  const submit=async(item:CreditCase)=>{try{await api.submitCreditCase(item.case_id);message.success('信用评估已提交至财务审批主管复核');load()}catch(e:any){message.error(e.message)}}
+  const decide=async(item:CreditCase,decision:'approved'|'rejected')=>{const final=item.status==='pending_final';let note='';Modal.confirm({title:decision==='approved'?(final?'确认最终批核该信审版本？':'确认主管复核通过并上报最终批核？'):'拒绝该信审版本？',content:<Input.TextArea placeholder="必填：审批意见" onChange={e=>note=e.target.value}/>,onOk:async()=>{if(!note.trim())throw new Error('请填写审批意见');await api.decideCreditCase(item.case_id,{decision,note});message.success(decision==='approved'?(final?'信审版本已最终生效':'已通过主管复核，待集团财务总监最终批核'):'信审版本已拒绝');load()}})}
+  const saveExposure=async()=>{if(!detail)return;try{const values=await exposureForm.validateFields();const result=await api.saveCreditExposure(detail.case_id,{...values,source:'manual'});setExposure(result);message.success('应收与订单敞口快照已保存')}catch(e:any){if(!e?.errorFields)message.error('保存敞口失败：'+e.message)}}
+  const uploadDocument=async(file:File)=>{if(!detail)return;try{await api.uploadCreditDocument(detail.case_id,file,documentType);message.success('信审材料已上传');await refreshDetail(detail)}catch(e:any){message.error('材料上传失败：'+e.message)}}
+  const runAssessment=async()=>{if(!detail)return;try{setRunning(true);setAssessmentSteps([]);const started=await api.startCreditAssessment(detail.case_id);setAssessment(started);for(let retry=0;retry<40;retry++){await new Promise(resolve=>setTimeout(resolve,700));const status=await api.creditAssessmentStatus(detail.case_id,started.assessment_id!);setAssessmentSteps(status.steps||[]);if(status.status==='done'||status.status==='error'){const full=await api.latestCreditAssessment(detail.case_id);setAssessment(full);if(status.status==='error')message.error(status.error||'量化评估失败');else message.success('量化信审评估已完成');break}}}catch(e:any){message.error('启动量化评估失败：'+e.message)}finally{setRunning(false)}}
+  const applyAssessment=async()=>{if(!detail||!assessment?.assessment_id)return;try{const updated=await api.applyCreditAssessment(detail.case_id,assessment.assessment_id);setDetail(updated);message.success('模型建议已应用到信审草稿，仍须走审批链路');load();await refreshDetail(updated)}catch(e:any){message.error(e.message)}}
+  const createCrmHook=async()=>{try{const v=await crmForm.validateFields();const result=await api.crmCreateHook({customer_name:v.customer_name,crm_account_id:v.crm_account_id,request_note:v.request_note,create_draft:true});message.success(`CRM 端口已接收 ${result.hook?.hook_id}；${result.credit_case?'已创建信审草稿':''}`);setCrmOpen(false);crmForm.resetFields();load();loadCrm()}catch(e:any){if(!e?.errorFields)message.error(e?.message||'CRM 试调失败')}}
+  const analysis=assessment?.report?.assessment; const narrative=assessment?.report?.narrative; const score=analysis?.scorecard?.score; const currency=analysis?.recommendation?.currency||detail?.conditions.currency||'CNY'
   return <>
-    <Card title={<Space><SafetyCertificateOutlined/>客户信审 · 前置商业条件</Space>} extra={<Space>
-      {canManage&&<Button icon={<ApiOutlined/>} onClick={()=>{setCrmOpen(true);loadCrm()}}>CRM 对接端口</Button>}
-      {canManage?<Button type="primary" icon={<PlusOutlined/>} onClick={()=>{form.resetFields();setDrawer(true)}}>新建信审版本</Button>:null}
-    </Space>}>
-      <Alert type="info" showIcon style={{marginBottom:16}} message="合同只能绑定“已生效”的信审版本。需要放宽账期、额度、预付款、付款方式或 VMI/JIT 时，先新建并审批信审版本，再重新提交合同复审。授信测算模型由信审模块提供；本页的 CRM 端口仅预留接入形状。"/>
+    <Card title={<Space><SafetyCertificateOutlined/>客户信审 · 前置商业条件</Space>} extra={<Space>{canManage&&<Button icon={<ApiOutlined/>} onClick={()=>{setCrmOpen(true);loadCrm()}}>CRM 对接端口</Button>}{canCreate?<Button type="primary" icon={<PlusOutlined/>} onClick={()=>{form.resetFields();setDrawer(true)}}>{canManage?'新建信审版本':'发起信审申请'}</Button>:null}</Space>}>
+      <Alert type="info" showIcon style={{marginBottom:16}} message="量化信审链路：本地材料解析 → 财务事实与敞口快照 → 版本化评分卡/制度规则 → 审核员复核 → 主管与集团财务总监批核。模型只能给出建议，只有“已生效”版本可绑定合同。"/>
       <Table rowKey="case_id" dataSource={items} pagination={{pageSize:10}} columns={[
-        {title:'客户',dataIndex:'customer_name',render:(v:string,r:CreditCase)=><Button type="link" onClick={()=>setDetail(r)}>{v}</Button>},
-        {title:'版本',dataIndex:'version',render:(v:number)=>`V${v}`},{title:'状态',dataIndex:'status',render:(v:string)=><Tag color={statusColor[v]}>{statusText[v]||v}</Tag>},
-        {title:'最长账期',render:(_:unknown,r:CreditCase)=>`${r.conditions.max_payment_days||0} 天`},{title:'最低预付款',render:(_:unknown,r:CreditCase)=>`${r.conditions.min_prepayment_ratio||0}%`},
-        {title:'额度上限',render:(_:unknown,r:CreditCase)=>`${r.conditions.max_credit_amount||0} ${r.conditions.currency||'CNY'}`},
-        {title:'操作',render:(_:unknown,r:CreditCase)=>canManage?<Space>{r.status==='draft'&&<Button size="small" icon={<SendOutlined/>} onClick={()=>submit(r)}>提交</Button>}{r.status==='pending_approval'&&<><Button size="small" type="primary" icon={<CheckCircleOutlined/>} onClick={()=>decide(r,'approved')}>批准生效</Button><Button size="small" danger onClick={()=>decide(r,'rejected')}>拒绝</Button></>}</Space>:null}
+        {title:'客户',dataIndex:'customer_name',render:(v:string,r:CreditCase)=><Button type="link" onClick={()=>openDetail(r)}>{v}</Button>},
+        {title:'版本',dataIndex:'version',render:(v:number)=>`V${v}`},{title:'业务线',dataIndex:'business_type',render:(v:string)=>v||'一般'},{title:'状态',dataIndex:'status',render:(v:string)=><Tag color={statusColor[v]}>{statusText[v]||v}</Tag>},
+        {title:'最长账期',render:(_:unknown,r:CreditCase)=>`${r.conditions.max_payment_days||0} 天`},{title:'最低预付款',render:(_:unknown,r:CreditCase)=>`${r.conditions.min_prepayment_ratio||0}%`},{title:'额度上限',render:(_:unknown,r:CreditCase)=>money(r.conditions.max_credit_amount,r.conditions.currency)},
+        {title:'操作',render:(_:unknown,r:CreditCase)=><Space>{canManage&&r.status==='draft'&&<Button size="small" icon={<PlayCircleOutlined/>} onClick={()=>openDetail(r)}>量化评估</Button>}{canManage&&r.status==='draft'&&<Button size="small" icon={<SendOutlined/>} onClick={()=>submit(r)}>送主管复核</Button>}{canDirector&&r.status==='pending_director'&&<><Button size="small" type="primary" icon={<CheckCircleOutlined/>} onClick={()=>decide(r,'approved')}>复核通过</Button><Button size="small" danger onClick={()=>decide(r,'rejected')}>拒绝</Button></>}{canFinal&&r.status==='pending_final'&&<><Button size="small" type="primary" icon={<CheckCircleOutlined/>} onClick={()=>decide(r,'approved')}>最终批核</Button><Button size="small" danger onClick={()=>decide(r,'rejected')}>拒绝</Button></>}</Space>}
       ]}/>
     </Card>
-    <Drawer title="新建客户信审版本" open={drawer} onClose={()=>setDrawer(false)} width={520} extra={<Button type="primary" onClick={create}>保存草稿</Button>}>
-      <Form form={form} layout="vertical" initialValues={{currency:'CNY',allowed_payment_methods:['bank_transfer'],allow_vmi_jit:false,max_credit_amount:0,max_payment_days:0,min_prepayment_ratio:0}}>
-        <Form.Item name="customer_name" label="客户名称" rules={[{required:true,message:'请填写客户名称'}]}><Input/></Form.Item><Form.Item name="request_note" label="申请说明"><Input.TextArea rows={3}/></Form.Item>
-        <Form.Item name="max_credit_amount" label="最大单笔/敞口金额" rules={[{required:true}]}><InputNumber min={0} precision={2} style={{width:'100%'}}/></Form.Item><Form.Item name="currency" label="币种"><Select options={['CNY','HKD','USD'].map(x=>({value:x,label:x}))}/></Form.Item>
-        <Form.Item name="max_payment_days" label="最长账期（天）" rules={[{required:true}]}><InputNumber min={0} max={3650} style={{width:'100%'}}/></Form.Item><Form.Item name="min_prepayment_ratio" label="交付前最低收款比例（%）" rules={[{required:true}]}><InputNumber min={0} max={100} style={{width:'100%'}}/></Form.Item>
+    <Drawer title={canManage?'新建客户信审版本':'发起客户信审申请'} open={drawer} onClose={()=>setDrawer(false)} width={520} extra={<Button type="primary" onClick={create}>{canManage?'保存评估草稿':'提交申请草稿'}</Button>}>
+      <Form form={form} layout="vertical" initialValues={{business_type:'TKP',currency:'CNY',allowed_payment_methods:['bank_transfer'],allow_vmi_jit:false,max_credit_amount:0,max_payment_days:0,min_prepayment_ratio:0}}>
+        <Form.Item name="customer_name" label="客户名称" rules={[{required:true,message:'请填写客户名称'}]}><Input/></Form.Item><Form.Item name="business_type" label="业务类型" rules={[{required:true}]}><Select options={[{value:'TKM',label:'TKM · 模具制作'},{value:'TKP',label:'TKP · 注塑组件制造'},{value:'一般',label:'一般'}]}/></Form.Item><Form.Item name="request_note" label="申请说明"><Input.TextArea rows={3}/></Form.Item>
+        <Form.Item name="max_credit_amount" label="申请最大单笔/敞口金额" rules={[{required:true}]}><InputNumber min={0} precision={2} style={{width:'100%'}}/></Form.Item><Form.Item name="currency" label="币种"><Select options={['CNY','HKD','USD'].map(x=>({value:x,label:x}))}/></Form.Item>
+        <Form.Item name="max_payment_days" label="申请最长账期（天）" rules={[{required:true}]}><InputNumber min={0} max={3650} style={{width:'100%'}}/></Form.Item><Form.Item name="min_prepayment_ratio" label="交付前最低收款比例（%）" rules={[{required:true}]}><InputNumber min={0} max={100} style={{width:'100%'}}/></Form.Item>
         <Form.Item name="allowed_payment_methods" label="允许付款方式"><Select mode="multiple" options={[{value:'bank_transfer',label:'银行转账'},{value:'acceptance_bill',label:'承兑汇票'}]}/></Form.Item><Form.Item name="allow_vmi_jit" label="允许 VMI/JIT"><Select options={[{value:false,label:'不允许'},{value:true,label:'允许'}]}/></Form.Item>
       </Form>
     </Drawer>
-    <Drawer title={`信审详情 · ${detail?.customer_name||''}`} open={!!detail} onClose={()=>setDetail(null)} width={520}>{detail&&<Descriptions bordered column={1} size="small"><Descriptions.Item label="版本 / 状态">V{detail.version} · <Tag color={statusColor[detail.status]}>{statusText[detail.status]}</Tag></Descriptions.Item><Descriptions.Item label="最长账期">{detail.conditions.max_payment_days} 天</Descriptions.Item><Descriptions.Item label="交付前最低收款">{detail.conditions.min_prepayment_ratio}%</Descriptions.Item><Descriptions.Item label="额度上限">{detail.conditions.max_credit_amount} {detail.conditions.currency}</Descriptions.Item><Descriptions.Item label="允许付款方式">{detail.conditions.allowed_payment_methods.join('、')}</Descriptions.Item><Descriptions.Item label="VMI/JIT">{detail.conditions.allow_vmi_jit?'允许':'不允许'}</Descriptions.Item><Descriptions.Item label="申请说明"><Text>{detail.request_note||'—'}</Text></Descriptions.Item><Descriptions.Item label="审批意见"><Text>{detail.decision_note||'—'}</Text></Descriptions.Item></Descriptions>}</Drawer>
-    <Drawer title="CRM 预留端口（Mock）" open={crmOpen} onClose={()=>setCrmOpen(false)} width={560}
-      extra={<Button type="primary" icon={<ApiOutlined/>} onClick={createCrmHook}>模拟 CRM 推送</Button>}>
-      <Alert type="info" showIcon style={{marginBottom:12}}
-        message="POST /api/integrations/crm/credit-hooks"
-        description="供 CRM 推送客户主数据/信用申请占位。本端口不执行授信测算，只创建信审草稿；额度与账期由信审 Agent 填充后审批生效。" />
-      <Form form={crmForm} layout="vertical" initialValues={{request_note:'来自 CRM 的信用申请占位'}}>
-        <Form.Item name="customer_name" label="客户名称" rules={[{required:true}]}><Input placeholder="与 CRM 客户主数据一致"/></Form.Item>
-        <Form.Item name="crm_account_id" label="CRM Account ID"><Input placeholder="可选"/></Form.Item>
-        <Form.Item name="request_note" label="申请说明"><Input.TextArea rows={2}/></Form.Item>
-      </Form>
-      <Table size="small" rowKey="hook_id" pagination={false} dataSource={crmHooks}
-        columns={[
-          {title:'Hook',dataIndex:'hook_id',render:(v:string)=><Text code>{v}</Text>},
-          {title:'客户',dataIndex:'customer_name'},
-          {title:'状态',dataIndex:'status',render:(v:string)=><Tag>{v}</Tag>},
-          {title:'信审草稿',dataIndex:'credit_case_id',render:(v:string)=>v||'—'},
-        ]}/>
+    <Drawer title={`量化信审 · ${detail?.customer_name||''}`} open={!!detail} onClose={()=>setDetail(null)} width={760} extra={<Space>{canManage&&detail?.status==='draft'&&<Button loading={running} type="primary" icon={<PlayCircleOutlined/>} onClick={runAssessment}>运行量化评估</Button>}{canManage&&assessment?.status==='done'&&analysis?.model_status==='ready_for_reviewer'&&<Button icon={<CheckCircleOutlined/>} onClick={applyAssessment}>应用建议到草稿</Button>}</Space>}>
+      {detail&&<>
+        <Descriptions bordered column={2} size="small"><Descriptions.Item label="版本 / 状态">V{detail.version} · <Tag color={statusColor[detail.status]}>{statusText[detail.status]}</Tag></Descriptions.Item><Descriptions.Item label="业务类型">{detail.business_type||'一般'}</Descriptions.Item><Descriptions.Item label="当前额度">{money(detail.conditions.max_credit_amount,detail.conditions.currency)}</Descriptions.Item><Descriptions.Item label="当前最长账期">{detail.conditions.max_payment_days} 天</Descriptions.Item></Descriptions>
+        <Divider titlePlacement="start">材料与交易敞口</Divider>
+        <Space wrap style={{marginBottom:10}}><Select value={documentType} onChange={setDocumentType} options={documentTypes} style={{width:170}}/>{canCreate&&detail.status==='draft'&&<Upload showUploadList={false} customRequest={({file,onSuccess,onError})=>uploadDocument(file as File).then(()=>onSuccess?.({})).catch(onError)}><Button icon={<CloudUploadOutlined/>}>上传本地材料</Button></Upload>}</Space>
+        <List size="small" bordered dataSource={documents} locale={{emptyText:'尚未上传信审材料'}} renderItem={item=><List.Item><Space><Tag>{documentTypes.find(x=>x.value===item.document_type)?.label||item.document_type}</Tag><Text>{item.original_name}</Text></Space><Text type="secondary">{dayjs(item.created_at*1000).format('MM-DD HH:mm')}</Text></List.Item>}/>
+        <Divider titlePlacement="start">CRM / ERP 敞口快照</Divider>
+        <Form form={exposureForm} layout="inline"><Form.Item name="current_receivables" label="已出货未收款" rules={[{required:true}]}><InputNumber min={0}/></Form.Item><Form.Item name="booked_order_amount" label="已入单金额" rules={[{required:true}]}><InputNumber min={0}/></Form.Item><Form.Item name="overdue_amount" label="逾期金额"><InputNumber min={0}/></Form.Item><Form.Item name="overdue_days" label="最长逾期天数" rules={[{required:true}]}><InputNumber min={0}/></Form.Item><Form.Item name="currency" hidden><Input/></Form.Item>{canManage&&detail.status==='draft'&&<Button icon={<DatabaseOutlined/>} onClick={saveExposure}>保存快照</Button>}</Form>
+        {exposure?.payload&&<Text type="secondary">最近快照：应收 {money(exposure.payload.current_receivables,exposure.payload.currency)}，已入单 {money(exposure.payload.booked_order_amount,exposure.payload.currency)}，最长逾期 {exposure.payload.overdue_days} 天。</Text>}
+        <Divider titlePlacement="start">评分与审批建议</Divider>
+        {running&&<Alert type="info" showIcon message="量化 Agent 正在运行" description={(assessmentSteps||[]).join(' · ')||'正在等待任务步骤…'} style={{marginBottom:12}}/>}
+        {assessment?.status==='error'&&<Alert type="error" showIcon message="评估失败" description={assessment.error||'请检查材料格式与运行环境'} style={{marginBottom:12}}/>}
+        {analysis?<><Space align="center" size="large"><Progress type="circle" percent={Number(score||0)} format={()=>`${score}/100`}/><Descriptions column={1} size="small"><Descriptions.Item label="信用等级"><Tag color={analysis.credit_grade==='A'?'green':analysis.credit_grade==='B'?'blue':'orange'}>{analysis.credit_grade}</Tag></Descriptions.Item><Descriptions.Item label="模型版本">{assessment?.model_version}</Descriptions.Item><Descriptions.Item label="材料覆盖率">{Math.round((analysis.scorecard?.coverage||0)*100)}%</Descriptions.Item><Descriptions.Item label="建议额度">{money(analysis.recommendation?.max_credit_amount,currency)}</Descriptions.Item><Descriptions.Item label="建议可用额度">{money(analysis.recommendation?.available_credit_amount,currency)}</Descriptions.Item><Descriptions.Item label="建议最长账期">{analysis.recommendation?.max_payment_days} 天</Descriptions.Item><Descriptions.Item label="建议最低预付款">{analysis.recommendation?.min_prepayment_ratio}%</Descriptions.Item></Descriptions></Space>
+          <Alert style={{marginTop:12}} type={analysis.model_status==='ready_for_reviewer'?'success':'warning'} showIcon message={narrative?.conclusion||'量化评估已完成'} description={narrative?.summary}/>
+          {(analysis.risk_flags||[]).length>0&&<List size="small" header="风险与制度阻断" dataSource={analysis.risk_flags} renderItem={(item:any)=><List.Item><Tag color={item.level==='high'?'red':'orange'}>{item.code}</Tag>{item.message}</List.Item>}/>} {(assessment?.report?.missing_materials||[]).length>0&&<List size="small" header="待补材料" dataSource={assessment?.report?.missing_materials} renderItem={(item:any)=><List.Item><Tag>{item.type}</Tag>{item.title}：{item.detail}</List.Item>}/>} {(assessment?.evidence||[]).length>0&&<List size="small" header="已固化的来源证据" dataSource={assessment?.evidence} renderItem={(item:any)=><List.Item><Tag>{item.field_name}</Tag><Text>{String(item.value)}</Text><Text type="secondary">{item.source_ref||'来源待确认'}</Text></List.Item>}/>}</>:<Alert type="info" showIcon message="尚未运行量化评估" description="上传财报/信用报告，保存应收与订单敞口后，运行 Agent 生成可追溯的量化建议。"/>}
+      </>}
+    </Drawer>
+    <Drawer title="CRM 预留端口（Mock）" open={crmOpen} onClose={()=>setCrmOpen(false)} width={560} extra={<Button type="primary" icon={<ApiOutlined/>} onClick={createCrmHook}>模拟 CRM 推送</Button>}>
+      <Alert type="info" showIcon style={{marginBottom:12}} message="POST /api/integrations/crm/credit-hooks" description="CRM 可先推送客户主数据并创建草稿；后续由量化信审 Agent 读取材料、应收与订单敞口，生成建议条件后再进入审批。"/>
+      <Form form={crmForm} layout="vertical" initialValues={{request_note:'来自 CRM 的信用申请占位'}}><Form.Item name="customer_name" label="客户名称" rules={[{required:true}]}><Input placeholder="与 CRM 客户主数据一致"/></Form.Item><Form.Item name="crm_account_id" label="CRM Account ID"><Input placeholder="可选"/></Form.Item><Form.Item name="request_note" label="申请说明"><Input.TextArea rows={2}/></Form.Item></Form>
+      <Table size="small" rowKey="hook_id" pagination={false} dataSource={crmHooks} columns={[{title:'Hook',dataIndex:'hook_id',render:(v:string)=><Text code>{v}</Text>},{title:'客户',dataIndex:'customer_name'},{title:'状态',dataIndex:'status',render:(v:string)=><Tag>{v}</Tag>},{title:'信审草稿',dataIndex:'credit_case_id',render:(v:string)=>v||'—'}]}/>
     </Drawer>
   </>
 }

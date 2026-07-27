@@ -16,7 +16,7 @@ GLOBAL_DIMS = [r['dim'] for r in RULES]
 SEVERITY = {'R01':'high','R02':'high','R04':'high','R10':'high','R12':'high','R16':'high',
             'R03':'mid','R05':'mid','R09':'mid','R06':'mid','R07':'mid','R08':'mid',
             'R11':'mid','R13':'mid','R14':'mid','R15':'mid'}
-LEVEL_TEXT = {'high':'阻断·需CEO/总监审批','mid':'需业务/总监确认','low':'通过（提示）'}
+LEVEL_TEXT = {'high':'阻断·须财务审批主管或集团财务总监审批','mid':'需业务确认或财务审批主管复核','low':'通过（提示）'}
 RULE2DIM = {r['id']: r['dim'] for r in RULES}
 DIM2RULE = {r['dim']: r['id'] for r in RULES}
 
@@ -104,15 +104,30 @@ def _hydrate_masked_amount(fields, mapping):
         fields['currency'] = fields.get('currency') or amounts[0]['currency']
     return fields
 
+
+def _local_contract_fields(clauses):
+    """Best-effort local fields used only when semantic LLM is unavailable."""
+    text = '\n'.join(str(item.get('text') or '') for item in clauses or [])
+    parties = {}
+    for label in ('甲方', '乙方'):
+        found = re.search(rf'{label}\s*[：:]\s*([^\n\r；;]{{2,120}})', text)
+        if found:
+            value = found.group(1).strip()
+            # The next party label is a stronger delimiter than punctuation in
+            # one-line TXT acceptance fixtures and simple purchase orders.
+            value = re.split(r'\s*(?:甲方|乙方)\s*[：:]', value, maxsplit=1)[0].strip(' ，,。')
+            parties[label] = value
+    return {'our_party': '乙方', 'parties': parties}
+
 def node_extract_fields(state):
-    llm = get_llm(json_mode=True, max_tokens=900, temperature=0, timeout=20, max_retries=0)
     sample = '\n'.join(c.get('text_masked', '')[:160] for c in state['masked_clauses'][:30])
     user = (state['masked_clauses'][0].get('text_masked', '')[:40] if state['masked_clauses'] else '') + '\n' + sample
     try:
+        llm = get_llm(json_mode=True, max_tokens=900, temperature=0, timeout=20, max_retries=0)
         msg = invoke_remote(llm, [SystemMessage(content=FIELD_PROMPT), HumanMessage(content=user)], completion_tokens=900)
         f = json.loads(msg.content)
     except Exception:
-        f = {}
+        f = _local_contract_fields(state.get('clauses') or [])
     # 字段只在强模型返回后于本地恢复，保证报告中的合同主体和金额可追溯。
     mapping = state.get('mapping', {})
     state['contract_fields'] = _restore_field_values(_hydrate_masked_amount(f, mapping), mapping)
@@ -174,7 +189,7 @@ def judge_one(llm, c, rule_ids, business_type, our_party, rules_by_id, rule2dim)
            '"term_days":number_or_null,"payment_trigger":"delivery|acceptance|invoice|other|unknown",'
            '"delivery_payment_ratio":number_or_null,"validity_years":number_or_null,'
            '"penalty_ratio":number_or_null,"has_fixed_contract_amount":true|false|null,'
-           '"undertakes_indirect_loss":true|false|null,"approval_role":"CEO|总监|none|unknown"}}},'
+           '"undertakes_indirect_loss":true|false|null,"approval_role":"集团财务总监|财务审批主管|none|unknown"}}},'
            '"suggestion":"<=120字修改建议"}。'
            '只返回 status 为 risk 或 uncertain 的维度；明确不适用的维度可以省略。无法确定时用 uncertain，禁止猜测。')
     user = (f'业务类型:{business_type}\n我方:{our_party}\n相关底限条款:\n{rule_ctx}\n'
@@ -218,7 +233,14 @@ def _max_analyze(n_clauses: int) -> int:
 HIGH_RULES = {'R01', 'R02', 'R04', 'R10', 'R12', 'R16'}
 
 def node_judge(state):
-    llm = get_llm(json_mode=True, max_tokens=1500, temperature=0, timeout=60, max_retries=0)
+    # A deterministic review must remain usable for the credit-to-contract
+    # control path even when a remote semantic model is intentionally absent.
+    # In that mode local rules still produce their auditable findings; the
+    # report clearly records that semantic interpretation was skipped.
+    try:
+        llm = get_llm(json_mode=True, max_tokens=1500, temperature=0, timeout=60, max_retries=0)
+    except Exception:
+        llm = None
     business_type = state.get('contract_fields', {}).get('business_type', '未知')
     our_party = state.get('contract_fields', {}).get('our_party', '乙方')
     clauses = state['masked_clauses']; hits = state['rule_hits']
@@ -253,7 +275,12 @@ def node_judge(state):
         clause = clauses[i]
         local = assess_clause(clause.get('text') or '', business_type)
         remaining = [r for r in hits.get(clause['id'], []) if r not in local]
-        result = judge_one(llm, clause, remaining, business_type, our_party, rules_by_id, rule2dim)
+        if llm and remaining:
+            result = judge_one(llm, clause, remaining, business_type, our_party, rules_by_id, rule2dim)
+        else:
+            result = {'clause_id': clause['id'], 'page': clause['start_page'], 'source_ref': clause.get('source_ref', ''),
+                      'requested': [], 'flags': {}, 'uncertain': {}, 'facts_by_dim': {}, 'evidence_map': {},
+                      'suggestion': '', 'skipped': not bool(local)}
         return i, attach_local(result, clause)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
         for i, res in ex.map(work, idxs):
@@ -270,10 +297,8 @@ def node_judge(state):
             results[i] = local_result
     state['infer'] = results
     analyzed = sum(1 for x in results if x and not x.get('skipped'))
-    state['steps'].append(
-        f'研判Agent(LLM×{analyzed}): 语义研判 {analyzed}/{len(results)} 条'
-        f'（窗口≤{_max_analyze(len(clauses))}；确定性规则仍覆盖全部条款）'
-    )
+    label = f'研判Agent(LLM×{analyzed})' if llm else '研判Agent(确定性兜底)'
+    state['steps'].append(f'{label}: 语义研判 {analyzed}/{len(results)} 条（窗口≤{_max_analyze(len(clauses))}；确定性规则仍覆盖全部条款）')
     return state
 
 def _number(value):
@@ -354,7 +379,7 @@ def node_enforce(state):
                 continue
             review_hints.append({'clause_id': cid, 'page': page, 'source_ref': source_ref, 'rule_id': rule_id,
                                  'rule_baseline': rules_by_id[rule_id]['baseline'], 'dim': dim,
-                                 'evidence': evidence_map.get(dim, ''), 'suggestion': '请由法务核对原文、附件及审批记录后确认。',
+                                 'evidence': evidence_map.get(dim, ''), 'suggestion': '请由信用审核专员核对原文、附件及审批记录后确认。',
                                  'severity': 'mid', 'level': '待人工确认',
                                  'numeric_note': '强模型无法确认主体、条件、否定或审批例外',
                                  'facts': facts_by_dim.get(dim, {}), 'approval_required': rules_by_id[rule_id].get('approval_role', ''),
@@ -398,7 +423,7 @@ def node_summary(state):
     high = sum(1 for r in rs if r['severity'] == 'high')
     mid = sum(1 for r in rs if r['severity'] == 'mid')
     low = sum(1 for r in rs if r['severity'] == 'low')
-    overall = '阻断·需CEO/总监审批' if high else ('需重点确认' if mid else '通过')
+    overall = '阻断·须财务审批主管或集团财务总监审批' if high else ('需重点确认' if mid else '通过')
     state['summary'] = {'n_clauses': len(state['clauses']), 'n_risks': len(rs),
                         'high': high, 'mid': mid, 'low': low, 'overall_level': overall,
                         'contract_fields': state.get('contract_fields', {}),
