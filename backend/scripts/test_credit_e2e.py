@@ -1,8 +1,8 @@
 """Full HTTP acceptance test for quantitative credit -> contract control.
 
 The fixture is intentionally fictional and de-identified.  This test does not
-need a remote LLM: the graph uses its deterministic fallback and still verifies
-the published credit snapshot plus the downstream exposure block.
+need a remote LLM: it verifies that the production API fails closed rather than
+using a deterministic extraction fallback.
 """
 import os
 import sys
@@ -96,36 +96,16 @@ def main():
         assessment = client.get(f'/api/credit/cases/{case_id}/assessments/latest', headers=admin)
         assert assessment.status_code == 200, assessment.text
         report = assessment.json()['report']
-        assert report['assessment']['credit_grade'] == 'A', report
-        assert report['assessment']['recommendation']['max_payment_days'] == 90, report
+        assert report['runtime_mode'] == 'production', report
+        assert report['assessment']['credit_grade'] == 'UNASSESSABLE', report
+        assert report['assessment']['recommendation']['max_credit_amount'] == 0, report
 
         applied = client.post(f'/api/credit/cases/{case_id}/assessments/{assessment_id}/apply', headers=admin)
-        assert applied.status_code == 200, applied.text
-        assert applied.json()['conditions']['max_payment_days'] == 90
-        submitted = client.post(f'/api/credit/cases/{case_id}/submit', headers=admin)
-        assert submitted.status_code == 200, submitted.text
-        assert submitted.json()['status'] == 'pending_director'
-        reviewed = client.post(f'/api/credit/cases/{case_id}/decision', headers=director, json={'decision': 'approved', 'note': '主管复核通过'})
-        assert reviewed.status_code == 200, reviewed.text
-        assert reviewed.json()['status'] == 'pending_final'
-        approved = client.post(f'/api/credit/cases/{case_id}/decision', headers=admin, json={'decision': 'approved', 'note': '最终批核通过'})
-        assert approved.status_code == 200, approved.text
-        assert approved.json()['status'] == 'approved'
-
-        # Existing exposure (300k) plus this contract (900k) exceeds the
-        # approved 1m limit.  The downstream contract workflow must preserve
-        # the CREDIT_EXPOSURE blocker even though the credit version is valid.
-        contract = '甲方：测试制造客户（脱敏）\n乙方：东江集团\n合同金额 900000 元，交付前支付20%预付款，货物交付后30天付款。'
-        review = client.post('/api/review', headers=admin, data={'business_type': 'TKP', 'credit_case_id': case_id},
-                             files={'file': ('credit_exposure_contract.txt', contract.encode('utf-8'), 'text/plain')})
-        assert review.status_code == 200, review.text
-        job = _wait_review(client, admin, review.json()['job_id'])
-        assert job['status'] == 'done', job
-        history = client.get(f"/api/history/{review.json()['job_id']}", headers=admin)
-        assert history.status_code == 200, history.text
-        risk_ids = {item['rule_id'] for item in history.json()['report']['risks']}
-        assert 'CREDIT_EXPOSURE' in risk_ids, risk_ids
-        print('OK: full credit assessment, approval, and contract-exposure workflow passed')
+        # Without a real Agent/reranker, production must fail closed and must
+        # never create a credit version or enter the contract workflow.
+        assert applied.status_code == 409, applied.text
+        assert '材料缺失或高风险阻断' in applied.json()['detail']
+        print('OK: production credit assessment fails closed without Agent/reranker')
 
 
 if __name__ == '__main__':

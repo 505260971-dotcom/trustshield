@@ -1,17 +1,20 @@
 """FastAPI auth dependencies and administrative routes."""
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 
 import httpx
-from dotenv import dotenv_values, set_key
+from dotenv import unset_key
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from . import store
+from .config import (
+    LEGACY_MODEL_ENV_KEYS, MODEL_RUNTIME_CONFIG_PATH, MODEL_RUNTIME_CONFIG_SCHEMA_VERSION,
+    get_model_runtime_config, update_model_runtime_config,
+)
 from .services.security import ROLE_LABELS, ROLES, can, issue_token, parse_token
 
 bearer = HTTPBearer(auto_error=False)
@@ -64,48 +67,44 @@ class SettingsPatch(BaseModel):
     mask_llm_api_base: str | None = Field(default=None, max_length=500)
     mask_llm_api_key: str | None = Field(default=None, max_length=500)
     mask_llm_model: str | None = Field(default=None, max_length=200)
+    financial_llm_extraction: bool | None = None
+    financial_llm_mode: str | None = Field(default=None, pattern='^(remote_substitute|local_or_intranet)$')
+    financial_llm_api_base: str | None = Field(default=None, max_length=500)
+    financial_llm_api_key: str | None = Field(default=None, max_length=500)
+    financial_llm_model: str | None = Field(default=None, max_length=200)
+    rerank_enabled: bool | None = None
+    rerank_allow_remote_financial_data: bool | None = None
+    rerank_base_url: str | None = Field(default=None, max_length=500)
+    rerank_api_key: str | None = Field(default=None, max_length=500)
+    rerank_model: str | None = Field(default=None, max_length=200)
+    embedding_enabled: bool | None = None
+    embedding_allow_remote_financial_data: bool | None = None
+    embedding_base_url: str | None = Field(default=None, max_length=500)
+    embedding_api_key: str | None = Field(default=None, max_length=500)
+    embedding_model: str | None = Field(default=None, max_length=200)
+    embedding_dimensions: int | None = Field(default=None, ge=0, le=4096)
 
 
 class SettingsTest(BaseModel):
-    kind: str = Field(default='llm', pattern='^(llm)$')
+    kind: str = Field(default='llm', pattern='^(llm|rerank|embedding)$')
     api_base: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, max_length=500)
     model: str | None = Field(default=None, max_length=200)
     ollama_base: str | None = Field(default=None, max_length=500)
+    dimensions: int | None = Field(default=None, ge=0, le=4096)
 
 
 _ENV_PATH = Path(__file__).resolve().parents[1] / '.env'
-_SETTING_ENV_KEYS = {
-    'llm_api_base': 'LLM_API_BASE', 'llm_api_key': 'LLM_API_KEY', 'llm_model': 'LLM_MODEL',
-    'ollama_base': 'OLLAMA_BASE',
-    'enable_masking': 'ENABLE_MASKING', 'smart_mask': 'SMART_MASK',
-    'mask_llm_api_base': 'MASK_LLM_API_BASE', 'mask_llm_api_key': 'MASK_LLM_API_KEY',
-    'mask_llm_model': 'MASK_LLM_MODEL',
-}
-_SECRET_SETTING_KEYS = {'llm_api_key', 'mask_llm_api_key'}
-
-
-def _env_values() -> dict[str, str]:
-    saved = dotenv_values(str(_ENV_PATH)) if _ENV_PATH.exists() else {}
-    return {env_key: str(saved.get(env_key) or os.getenv(env_key, '') or '') for env_key in _SETTING_ENV_KEYS.values()}
-
-
-def _configured(values: dict[str, str], key: str) -> bool:
-    return bool(values.get(_SETTING_ENV_KEYS[key], '').strip())
+_SECRET_SETTING_KEYS = {'llm_api_key', 'mask_llm_api_key', 'financial_llm_api_key', 'rerank_api_key', 'embedding_api_key'}
 
 
 def _settings_payload() -> dict:
-    values = _env_values()
+    values = get_model_runtime_config()
     return {
-        'llm_api_base': values['LLM_API_BASE'],
-        'llm_model': values['LLM_MODEL'],
-        'llm_api_key_configured': _configured(values, 'llm_api_key'),
-        'ollama_base': values['OLLAMA_BASE'],
-        'enable_masking': values['ENABLE_MASKING'].lower() != 'false',
-        'smart_mask': values['SMART_MASK'].lower() == 'true',
-        'mask_llm_api_base': values['MASK_LLM_API_BASE'],
-        'mask_llm_model': values['MASK_LLM_MODEL'],
-        'mask_llm_api_key_configured': _configured(values, 'mask_llm_api_key'),
+        **{key: value for key, value in values.items() if key not in _SECRET_SETTING_KEYS},
+        **{f'{key}_configured': bool(values.get(key)) for key in _SECRET_SETTING_KEYS},
+        'storage': 'plain_config_file',
+        'schema_version': MODEL_RUNTIME_CONFIG_SCHEMA_VERSION,
     }
 
 
@@ -152,12 +151,35 @@ def create_user(body: UserIn, request: Request, user=Depends(require('admin:user
 
 @router.patch('/admin/users/{user_id}')
 def patch_user(user_id: str, body: UserPatch, request: Request, user=Depends(require('admin:users'))):
+    target = store.get_user(user_id)
+    if not target: raise HTTPException(404,'用户不存在')
     if user_id==user['id'] and body.active is False: raise HTTPException(400,'不能停用当前登录管理员')
+    if user_id==user['id'] and body.role is not None and body.role != 'admin':
+        raise HTTPException(400,'当前登录管理员不能将自己降级；请由另一位管理员操作')
+    will_remain_active_admin = (target.get('role') == 'admin' and bool(target.get('active'))
+                                and (body.role not in (None, 'admin') or body.active is False))
+    if will_remain_active_admin and store.active_admin_count(exclude_user_id=user_id) < 1:
+        raise HTTPException(400,'系统至少需要保留一名启用的集团财务总监 / 最终审批人')
     try: updated=store.update_user(user_id,**body.model_dump(exclude_unset=True))
     except ValueError as e: raise HTTPException(400,str(e))
-    if not updated: raise HTTPException(404,'用户不存在')
-    store.audit(user,'admin.user_update','user',user_id,body.model_dump(exclude_unset=True),request.client.host if request.client else '')
+    audit_fields = body.model_dump(exclude_unset=True)
+    if 'password' in audit_fields: audit_fields['password_changed'] = bool(audit_fields.pop('password'))
+    store.audit(user,'admin.user_update','user',user_id,audit_fields,request.client.host if request.client else '')
     return updated
+
+
+@router.delete('/admin/users/{user_id}')
+def delete_user(user_id: str, request: Request, user=Depends(require('admin:users'))):
+    if user_id == user['id']:
+        raise HTTPException(400,'不能永久删除当前登录管理员')
+    target = store.get_user(user_id)
+    if not target:
+        raise HTTPException(404,'用户不存在')
+    if target.get('role') == 'admin' and target.get('active') and store.active_admin_count(exclude_user_id=user_id) < 1:
+        raise HTTPException(400,'系统至少需要保留一名启用的集团财务总监 / 最终审批人')
+    deleted = store.delete_user(user_id)
+    store.audit(user,'admin.user_delete','user',user_id,{'username':deleted['username'],'role':deleted['role'],'permanent':True},request.client.host if request.client else '')
+    return {'deleted':True,'user_id':user_id}
 
 @router.get('/admin/audit')
 def audit(limit: int=100, user=Depends(require('admin:audit'))):
@@ -175,39 +197,60 @@ def patch_settings(body: SettingsPatch, request: Request, user=Depends(require('
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(400, '没有可保存的配置')
-    changed=[]
-    for field, value in updates.items():
+    for field, value in list(updates.items()):
         # Blank secret inputs mean "keep current" so the UI never needs to hold
         # or echo a real API key in browser state.
         if field in _SECRET_SETTING_KEYS and not str(value or '').strip():
+            updates.pop(field)
             continue
-        env_key = _SETTING_ENV_KEYS[field]
-        if isinstance(value, bool): value = 'true' if value else 'false'
-        elif isinstance(value, int): value = str(value)
-        else: value = str(value or '').strip()
-        set_key(str(_ENV_PATH), env_key, value, quote_mode='auto')
-        changed.append(env_key)
-    store.audit(user, 'admin.settings_update', 'settings', '', {'keys': changed}, request.client.host if request.client else '')
+        if isinstance(value, str): updates[field] = value.strip()
+    if not updates:
+        raise HTTPException(400, '没有可保存的配置')
+    update_model_runtime_config(updates)
+    changed = sorted(updates)
+    store.audit(user, 'admin.settings_update', 'model_runtime', '', {'keys': changed, 'storage': 'plain_config_file'}, request.client.host if request.client else '')
     return {**_settings_payload(), 'changed': changed, 'requires_restart': True}
+
+
+@router.post('/admin/settings/clear-legacy-model-env')
+def clear_legacy_model_env(request: Request, user=Depends(require('admin:users'))):
+    """Remove obsolete model keys from the local .env after config.json migration."""
+    # Verify that the sole runtime config file exists before modifying the
+    # legacy bootstrap file.
+    if not Path(MODEL_RUNTIME_CONFIG_PATH).exists():
+        raise HTTPException(409, 'config.json 尚未初始化，拒绝清理旧模型配置')
+    get_model_runtime_config()
+    removed = []
+    if _ENV_PATH.exists():
+        for env_key in LEGACY_MODEL_ENV_KEYS.values():
+            if unset_key(str(_ENV_PATH), env_key, quote_mode='auto'):
+                removed.append(env_key)
+    store.audit(user, 'admin.settings_clear_legacy_env', 'model_runtime', '', {'keys': removed}, request.client.host if request.client else '')
+    return {'removed': removed, 'requires_restart': True}
 
 
 @router.post('/admin/settings/test')
 async def test_settings(body: SettingsTest, user=Depends(require('admin:users'))):
-    values = _env_values()
-    base = (body.api_base or values.get('LLM_API_BASE', '')).strip()
-    key = (body.api_key or values.get('LLM_API_KEY', '')).strip()
-    model = (body.model or values.get('LLM_MODEL', '')).strip()
+    values = get_model_runtime_config()
+    prefix = {'llm': 'llm', 'rerank': 'rerank', 'embedding': 'embedding'}[body.kind]
+    base = (body.api_base or values.get(f'{prefix}_api_base') or values.get(f'{prefix}_base_url') or '').strip()
+    key = (body.api_key or values.get(f'{prefix}_api_key', '')).strip()
+    model = (body.model or values.get(f'{prefix}_model', '')).strip()
     started = time.perf_counter()
     try:
         if not (base and key and model):
-            return {'ok': False, 'kind': 'llm', 'message': '请填写主模型地址、API Key 和模型'}
+            return {'ok': False, 'kind': body.kind, 'message': '请填写 API 地址、API Key 和模型'}
         async with httpx.AsyncClient(timeout=12) as client:
-            response = await client.post(
-                _openai_endpoint(base, 'chat/completions'),
-                headers={'Authorization': f'Bearer {key}'},
-                json={'model': model, 'messages': [{'role': 'user', 'content': 'Reply with OK only.'}], 'max_tokens': 2},
-            )
+            if body.kind == 'llm':
+                response = await client.post(_openai_endpoint(base, 'chat/completions'), headers={'Authorization': f'Bearer {key}'}, json={'model': model, 'messages': [{'role': 'user', 'content': 'Reply with OK only.'}], 'max_tokens': 2})
+            elif body.kind == 'rerank':
+                response = await client.post(base.rstrip('/') + '/reranks', headers={'Authorization': f'Bearer {key}'}, json={'model': model, 'query': '信用风险', 'documents': ['企业财务报表证据'], 'top_n': 1})
+            else:
+                payload = {'model': model, 'input': ['信用风险']}
+                if body.dimensions:
+                    payload['dimensions'] = body.dimensions
+                response = await client.post(_openai_endpoint(base, 'embeddings'), headers={'Authorization': f'Bearer {key}'}, json=payload)
             ok = response.status_code < 400
-        return {'ok': ok, 'kind': 'llm', 'model': model, 'latency_ms': round((time.perf_counter() - started) * 1000), 'message': '连接成功' if ok else _test_error(response)}
+        return {'ok': ok, 'kind': body.kind, 'model': model, 'latency_ms': round((time.perf_counter() - started) * 1000), 'message': '连接成功' if ok else _test_error(response)}
     except Exception as exc:
-        return {'ok': False, 'kind': 'llm', 'latency_ms': round((time.perf_counter() - started) * 1000), 'message': f'连接失败：{str(exc)[:180]}'}
+        return {'ok': False, 'kind': body.kind, 'latency_ms': round((time.perf_counter() - started) * 1000), 'message': f'连接失败：{str(exc)[:180]}'}

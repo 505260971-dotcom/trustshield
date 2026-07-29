@@ -28,6 +28,16 @@ def approved_credit(reviewer, director, cfo, days=45):
         'allowed_payment_methods': ['bank_transfer'],
         'allow_vmi_jit': False,
     }, '回归测试信审', reviewer)
+    # A credit version now needs an attributable production assessment basis
+    # before it can enter the human approval ladder.
+    task = store.start_credit_assessment(item['case_id'], reviewer)
+    report = {
+        'runtime_mode': 'production', 'audit_runtime': {'status': 'ready_for_policy'},
+        'assessment': {'model_status': 'ready_for_reviewer', 'risk_flags': [],
+                       'business_type': '一般', 'recommendation': item['conditions']},
+    }
+    assessment = store.finish_credit_assessment(task['assessment_id'], report, [])
+    item = store.record_credit_reviewer_decision(item['case_id'], assessment, item['conditions'], '', 'agent_recommended', reviewer)
     store.submit_credit_case(item['case_id'], reviewer)
     try:
         store.decide_credit_case(item['case_id'], 'approved', '试图跳过主管复核', cfo)

@@ -24,6 +24,12 @@ assert admin and admin['role']=='admin' and issue_token(admin)
 reviewer = store.create_user('reviewer', '信用审核专员', 'reviewer', 'ReviewerPassword2026!')
 director = store.create_user('director', '财务审批主管', 'director', 'DirectorPassword2026!')
 credit = store.create_credit_case('测试客户', {'max_credit_amount': 1000000, 'max_payment_days': 60, 'min_prepayment_ratio': 30, 'allowed_payment_methods': ['bank_transfer']}, '单元测试信审', reviewer)
+assessment_task = store.start_credit_assessment(credit['case_id'], reviewer)
+assessment = store.finish_credit_assessment(assessment_task['assessment_id'], {
+    'runtime_mode': 'production', 'audit_runtime': {'status': 'ready_for_policy'},
+    'assessment': {'model_status': 'ready_for_reviewer', 'risk_flags': [], 'business_type': '一般', 'recommendation': credit['conditions']},
+}, [])
+credit = store.record_credit_reviewer_decision(credit['case_id'], assessment, credit['conditions'], '', 'agent_recommended', reviewer)
 store.submit_credit_case(credit['case_id'], reviewer)
 credit = store.decide_credit_case(credit['case_id'], 'approved', '主管复核', director)
 assert credit['status'] == 'pending_final'

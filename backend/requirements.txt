@@ -9,6 +9,9 @@ cryptography>=44
 PyJWT>=2.10
 langgraph>=0.2
 langchain-openai>=0.3
-# Optional OCR for scanned PNG/JPG contracts
-# pillow
-# pytesseract
+# qwen3-rerank is called with the Python standard-library HTTP client; no
+# provider SDK is required.  Keep this explicit dependency list minimal.
+# OCR for scanned PDFs and image uploads.  The deployment must additionally
+# install the Tesseract executable and Chinese/English language packs.
+pillow>=10
+pytesseract>=0.3.10

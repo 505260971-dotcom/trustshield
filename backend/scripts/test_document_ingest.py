@@ -18,7 +18,7 @@ DATA = os.path.join(
 
 
 def sample_path():
-    candidates = sorted(Path(DATA).glob('*.docx'))
+    candidates = sorted(path for path in Path(DATA).glob('*.docx') if not path.name.startswith('~$'))
     if not candidates:
         raise SystemExit(f'未找到 DOCX 验收样例: {DATA}')
     preferred = next((path for path in candidates if '销售订单' in path.name), candidates[0])

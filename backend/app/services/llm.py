@@ -3,10 +3,25 @@ from langchain_core.messages import SystemMessage
 from ..config import (
     LLM_API_BASE, LLM_API_KEY, LLM_MODEL,
     SMART_MASK, MASK_LLM_API_BASE, MASK_LLM_API_KEY, MASK_LLM_MODEL,
-    REMOTE_CONTEXT_TOKENS, LOCAL_CONTEXT_TOKENS, LLM_TIMEOUT_SECONDS, configured_llm,
+    FINANCIAL_LLM_API_BASE, FINANCIAL_LLM_API_KEY, FINANCIAL_LLM_MODEL,
+    REMOTE_CONTEXT_TOKENS, LOCAL_CONTEXT_TOKENS, LLM_TIMEOUT_SECONDS, configured_financial_llm, configured_llm,
 )
 
 _MESSAGE_OVERHEAD_TOKENS = 32
+
+
+def _provider_generation_options(api_base: str) -> dict:
+    """Apply only documented provider-specific generation controls.
+
+    Qwen's newer thinking-capable models may spend the complete output budget
+    on reasoning tokens before emitting the required JSON.  Extraction and
+    report-formatting Agents need deterministic structured output, so disable
+    thinking only for the DashScope-compatible endpoint.  Other providers do
+    not receive an unknown parameter.
+    """
+    if 'dashscope.aliyuncs.com' in str(api_base or '').lower():
+        return {'extra_body': {'enable_thinking': False}}
+    return {}
 
 
 def _utf8_size(value):
@@ -160,6 +175,28 @@ def get_llm(temperature=0.1, max_tokens=4096, json_mode=False, timeout=None, max
         timeout=LLM_TIMEOUT_SECONDS if timeout is None else timeout,
         max_retries=max(0, int(max_retries)),
     )
+    kw.update(_provider_generation_options(LLM_API_BASE))
+    if json_mode:
+        kw['model_kwargs'] = {'response_format': {'type': 'json_object'}}
+    return ChatOpenAI(**kw)
+
+
+def get_financial_llm(temperature=0, max_tokens=1800, json_mode=True, timeout=45, max_retries=0):
+    """Return the isolated financial-extraction model, with explicit demo fallback."""
+    if not configured_financial_llm():
+        raise RuntimeError('财报 LLM 未配置：请设置 FINANCIAL_LLM_* 或主 LLM_* 配置')
+    max_tokens = min(max_tokens, max(64, REMOTE_CONTEXT_TOKENS - 256))
+    kw = dict(
+        model=FINANCIAL_LLM_MODEL,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        base_url=FINANCIAL_LLM_API_BASE,
+        api_key=FINANCIAL_LLM_API_KEY,
+        default_headers={'User-Agent': 'Mozilla/5.0'},
+        timeout=LLM_TIMEOUT_SECONDS if timeout is None else timeout,
+        max_retries=max(0, int(max_retries)),
+    )
+    kw.update(_provider_generation_options(FINANCIAL_LLM_API_BASE))
     if json_mode:
         kw['model_kwargs'] = {'response_format': {'type': 'json_object'}}
     return ChatOpenAI(**kw)

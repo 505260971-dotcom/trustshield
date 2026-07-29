@@ -2,7 +2,7 @@ import os, json, concurrent.futures, re, difflib
 from typing import TypedDict, List, Dict, Any, Annotated
 from langgraph.graph import StateGraph, START, END
 
-from ..config import ENABLE_MASKING, SMART_MASK, MASK_LLM_MODEL
+from ..config import ENABLE_MASKING, SMART_MASK, MASK_LLM_MODEL, masking_model_mode
 from ..services.llm import get_llm, invoke_remote
 from ..services.rules import RULES, RULE_BY_ID
 from ..services.parse import parse_contract
@@ -28,7 +28,10 @@ class State(TypedDict, total=False):
     rules: List[Dict[str, Any]]; rules_by_id: Dict[str, Dict[str, Any]]; rule2dim: Dict[str, str]; dim2rule: Dict[str, str]
     parent_report: Dict[str, Any]; review_clause_ids: set[str]; review_scope: Dict[str, Any]
     infer: List[Dict[str, Any]]; risks: List[Dict[str, Any]]; review_hints: List[Dict[str, Any]]; summary: Dict[str, Any]
-    steps: Annotated[List[str], lambda a, b: a + b]
+    # Nodes mutate and return the complete sequential state. A reducer here
+    # would concatenate every historical step list again on every node.
+    steps: List[str]
+    semantic_llm_attempts: int; semantic_llm_successes: int
 
 def node_ingest(state):
     r = parse_contract(state['path'])
@@ -73,8 +76,9 @@ def node_mask(state):
     if SMART_MASK:
         m, mp = mask_clauses_smart(state['clauses'])
         state['masked_clauses'] = m; state['mapping'] = mp
-        mode = '正则+本地8B' if MASK_LLM_MODEL else '正则回退（未配置本地8B）'
-        state['steps'].append(f'本地隐私脱敏Agent({mode}): 脱敏 {len(mp)} 个敏感实体')
+        mode = {'local_ollama': '正则+本地专用模型', 'remote_proxy': '正则+专用模型（远端替代）',
+                'regex_only': '正则回退（未配置专用模型）'}[masking_model_mode()]
+        state['steps'].append(f'脱敏Agent({mode}): 脱敏 {len(mp)} 个敏感实体')
     else:
         m, mp = mask_clauses(state['clauses'])
         state['masked_clauses'] = m; state['mapping'] = mp
@@ -194,13 +198,15 @@ def judge_one(llm, c, rule_ids, business_type, our_party, rules_by_id, rule2dim)
            '只返回 status 为 risk 或 uncertain 的维度；明确不适用的维度可以省略。无法确定时用 uncertain，禁止猜测。')
     user = (f'业务类型:{business_type}\n我方:{our_party}\n相关底限条款:\n{rule_ctx}\n'
             f'需评估维度: {dims_str}\n\n条款#{c["id"]} (页{c["start_page"]}) 脱敏后文本:\n{txt_masked[:1800]}')
-    data = {}
+    data = {}; model_attempted = False; model_succeeded = False
     for attempt in range(1):
         try:
+            model_attempted = True
             r = invoke_remote(llm, [SystemMessage(content=sys), HumanMessage(content=user)], completion_tokens=1500)
             data = _robust_json(r.content)
             assessments = data.get('assessments') or data.get('flags')
             if isinstance(assessments, dict) and assessments:
+                model_succeeded = True
                 break
         except Exception as e:
             data = {'_error': str(e)}
@@ -221,7 +227,8 @@ def judge_one(llm, c, rule_ids, business_type, our_party, rules_by_id, rule2dim)
     suggestion = data.get('suggestion', '')
     inf = {'clause_id': c['id'], 'page': c['start_page'], 'source_ref': c.get('source_ref', ''), 'requested': requested_dims,
            'flags': flags, 'uncertain': uncertain, 'evidence_map': evidence_map,
-           'facts_by_dim': facts_by_dim, 'suggestion': suggestion, 'rule_ids': list(rule_ids)}
+           'facts_by_dim': facts_by_dim, 'suggestion': suggestion, 'rule_ids': list(rule_ids),
+           'model_attempted': model_attempted, 'model_succeeded': model_succeeded}
     return inf
 
 # Deterministic rules inspect every clause. Semantic LLM review is bounded for
@@ -280,7 +287,7 @@ def node_judge(state):
         else:
             result = {'clause_id': clause['id'], 'page': clause['start_page'], 'source_ref': clause.get('source_ref', ''),
                       'requested': [], 'flags': {}, 'uncertain': {}, 'facts_by_dim': {}, 'evidence_map': {},
-                      'suggestion': '', 'skipped': not bool(local)}
+                      'suggestion': '', 'skipped': not bool(local), 'model_attempted': False, 'model_succeeded': False}
         return i, attach_local(result, clause)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
         for i, res in ex.map(work, idxs):
@@ -296,9 +303,15 @@ def node_judge(state):
         if not local_result.get('skipped'):
             results[i] = local_result
     state['infer'] = results
-    analyzed = sum(1 for x in results if x and not x.get('skipped'))
-    label = f'研判Agent(LLM×{analyzed})' if llm else '研判Agent(确定性兜底)'
-    state['steps'].append(f'{label}: 语义研判 {analyzed}/{len(results)} 条（窗口≤{_max_analyze(len(clauses))}；确定性规则仍覆盖全部条款）')
+    semantic_attempts = sum(1 for x in results if x and x.get('model_attempted'))
+    semantic_successes = sum(1 for x in results if x and x.get('model_succeeded'))
+    deterministic_hits = sum(1 for x in results if x and not x.get('skipped') and not x.get('model_attempted'))
+    state['semantic_llm_attempts'] = semantic_attempts
+    state['semantic_llm_successes'] = semantic_successes
+    state['steps'].append(
+        f'研判Agent: 远端语义调用成功 {semantic_successes}/{semantic_attempts}，'
+        f'确定性命中 {deterministic_hits} 条（语义窗口≤{_max_analyze(len(clauses))}）'
+    )
     return state
 
 def _number(value):
@@ -427,7 +440,9 @@ def node_summary(state):
     state['summary'] = {'n_clauses': len(state['clauses']), 'n_risks': len(rs),
                         'high': high, 'mid': mid, 'low': low, 'overall_level': overall,
                         'contract_fields': state.get('contract_fields', {}),
-                        'n_needs_review': len(state.get('review_hints', []))}
+                        'n_needs_review': len(state.get('review_hints', [])),
+                        'semantic_llm_attempts': state.get('semantic_llm_attempts', 0),
+                        'semantic_llm_successes': state.get('semantic_llm_successes', 0)}
     state['steps'].append(f'汇总结论Agent: 总体 {overall}')
     return state
 

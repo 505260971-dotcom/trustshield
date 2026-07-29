@@ -17,6 +17,7 @@ os.environ.update({
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from app import store
+from app.graph import credit_graph
 from app.graph.credit_graph import run_credit_assessment
 from app.services.credit import assess_credit_compliance
 
@@ -42,11 +43,28 @@ def main():
         'overdue_amount': 0, 'overdue_days': 0, 'currency': 'CNY',
     }, admin)
     raw_document = store.get_credit_document(case['case_id'], document['document_id'])
-    report, evidence = run_credit_assessment(store.get_credit_case(case['case_id']), [raw_document], snapshot['payload'], store.get_credit_model())
+    # The business graph has no alternate mode.  Mock only the remote ReAct
+    # boundary so this offline regression can exercise the production policy
+    # path deterministically.
+    original_audit = credit_graph.run_react_credit_audit
+    try:
+        facts = {'revenue': 20_000_000, 'current_assets': 12_000_000, 'current_liabilities': 6_000_000,
+                 'total_assets': 30_000_000, 'total_liabilities': 12_000_000, 'net_profit': 1_600_000,
+                 'operating_cashflow': 2_400_000, 'financial_currency': 'CNY',
+                 'financial_source': 'react_verified_claims'}
+        claims = [{'claim_id': key, 'type': 'financial_metric', 'metric': key, 'value': value,
+                   'document_id': document['document_id'], 'source_ref': 'offline-react-mock'}
+                  for key, value in facts.items() if isinstance(value, (int, float))]
+        credit_graph.run_react_credit_audit = lambda *_args, **_kwargs: {
+            'status': 'ready_for_policy', 'facts': facts, 'claims': claims, 'trace': [], 'material_requests': []}
+        report, evidence = run_credit_assessment(store.get_credit_case(case['case_id']), [raw_document], snapshot['payload'], store.get_credit_model())
+    finally:
+        credit_graph.run_react_credit_audit = original_audit
     assert report['assessment']['credit_grade'] == 'A'
     assert report['assessment']['recommendation']['max_payment_days'] == 90
     assert report['assessment']['recommendation']['max_credit_amount'] == 1_000_000
     assert len(evidence) >= 7
+    assert all(row['category'] == 'react_verified_claim' for row in evidence)
 
     task = store.start_credit_assessment(case['case_id'], admin)
     stored = store.finish_credit_assessment(task['assessment_id'], report, evidence)

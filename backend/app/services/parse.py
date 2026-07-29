@@ -13,6 +13,12 @@ except Exception:
 import pdfplumber
 
 
+PARSER_VERSION = 'source-text-v2'
+_OCR_LANGUAGES = os.getenv('CONTRACTGUARD_OCR_LANGUAGES', 'chi_sim+eng')
+_OCR_MIN_NATIVE_CHARS = max(20, int(os.getenv('CONTRACTGUARD_OCR_MIN_NATIVE_CHARS', '48')))
+_TESSERACT_CMD = os.getenv('TESSERACT_CMD', '').strip()
+
+
 def _clean(text):
     return re.sub(r'\s+', ' ', text).strip()
 
@@ -123,25 +129,110 @@ def _apply_docx_page_map(path, records):
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _read_image_records(path):
-    """Optional OCR for scanned contract images. Requires pytesseract + system tesseract."""
+def _ocr_records(image, page: int, source_prefix: str):
+    """Turn an image into source-bound text records with a clear OCR marker."""
     try:
-        from PIL import Image
         import pytesseract
     except Exception as exc:
-        raise ValueError('扫描件 OCR 依赖未安装：请安装 Pillow、pytesseract，并配置系统 Tesseract') from exc
+        raise ValueError('扫描件 OCR 依赖未安装：请安装 Pillow、pytesseract，并配置系统 Tesseract 及 chi_sim/eng 语言包') from exc
+    if _TESSERACT_CMD:
+        pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
     try:
-        text = pytesseract.image_to_string(Image.open(path), lang='chi_sim+eng')
+        text = pytesseract.image_to_string(image, lang=_OCR_LANGUAGES, config='--psm 6')
     except Exception as exc:
         raise ValueError(f'OCR 识别失败：{exc}') from exc
     out = []
     for index, line in enumerate((text or '').splitlines(), 1):
-        record = _record(line, f'OCR第{index}行', source_kind='ocr')
+        record = _record(line, f'{source_prefix} · OCR第{index}行', page=page, source_kind='ocr')
         if record:
             out.append(record)
-    if not out:
-        raise ValueError('OCR 未识别到可用文本，请检查图片清晰度或改用 DOCX/PDF')
     return out
+
+
+def _read_image_records(path):
+    """OCR image uploads into text while retaining an OCR line-level anchor."""
+    try:
+        from PIL import Image
+    except Exception as exc:
+        raise ValueError('扫描件 OCR 依赖未安装：请安装 Pillow、pytesseract，并配置系统 Tesseract') from exc
+    try:
+        with Image.open(path) as image:
+            out = _ocr_records(image.copy(), 1, '图片第1页')
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f'图片读取失败：{exc}') from exc
+    if not out:
+        raise ValueError('OCR 未识别到可用文本，请检查图片清晰度、语言包或扫描质量')
+    return out
+
+
+def _pdf_table_records(page, page_index: int):
+    """Keep PDF table rows as text records before falling back to flattened lines."""
+    out = []
+    try:
+        tables = page.extract_tables() or []
+    except Exception:
+        tables = []
+    for table_index, table in enumerate(tables, 1):
+        for row_index, row in enumerate(table or [], 1):
+            cells = [f'列{column_index}: {_clean(str(cell))}' for column_index, cell in enumerate(row or [], 1)
+                     if cell is not None and _clean(str(cell))]
+            record = _record(' | '.join(cells), f'第{page_index}页 · 表格{table_index}第{row_index}行',
+                             page=page_index, source_kind='table')
+            if record:
+                out.append(record)
+    return out
+
+
+def _read_pdf_records(path):
+    """Extract native PDF text/table rows and OCR only pages that have no usable text.
+
+    Native text remains preferred because it preserves characters exactly. OCR
+    is page-scoped for scanned pages and is never silently skipped: a document
+    that needs OCR but has no configured OCR runtime fails visibly, rather than
+    entering RAG as an empty or partial report.
+    """
+    out = []
+    needs_ocr_pages = []
+    usable_records = 0
+    with pdfplumber.open(path) as pdf:
+        for page_index, page in enumerate(pdf.pages, 1):
+            native_text = page.extract_text() or ''
+            native_records = [record for line in native_text.split('\n')
+                              if (record := _record(line, f'第{page_index}页', page=page_index, source_kind='pdf'))]
+            table_records = _pdf_table_records(page, page_index)
+            out.extend(native_records)
+            out.extend(table_records)
+            usable_records += len(native_records) + len(table_records)
+            native_chars = len(re.sub(r'\s+', '', native_text))
+            if native_chars >= _OCR_MIN_NATIVE_CHARS or table_records:
+                continue
+            try:
+                image = page.to_image(resolution=300).original
+                ocr_records = _ocr_records(image, page_index, f'第{page_index}页')
+            except ValueError as exc:
+                reason = f'第{page_index}页（{exc}）'
+                needs_ocr_pages.append(reason)
+                out.append({'text': f'[OCR 待处理：{reason}]', 'source_ref': f'第{page_index}页',
+                            'source_kind': 'ocr_pending', 'start_page': page_index, 'end_page': page_index})
+                continue
+            if ocr_records:
+                out.extend(ocr_records)
+                usable_records += len(ocr_records)
+            else:
+                reason = f'第{page_index}页（OCR 未识别出文字）'
+                needs_ocr_pages.append(reason)
+                out.append({'text': f'[OCR 待处理：{reason}]', 'source_ref': f'第{page_index}页',
+                            'source_kind': 'ocr_pending', 'start_page': page_index, 'end_page': page_index})
+    if not usable_records:
+        raise ValueError('PDF 未提取到可用文字或表格行')
+    return out
+
+
+def text_asset_status(records) -> str:
+    """A partial asset preserves native text while making OCR gaps visible."""
+    return 'partial' if any(record.get('source_kind') == 'ocr_pending' for record in (records or [])) else 'ready'
 
 
 def read_paragraphs(path):
@@ -149,14 +240,7 @@ def read_paragraphs(path):
     if ext == '.docx':
         return _read_docx_records(path)
     if ext == '.pdf':
-        out = []
-        with pdfplumber.open(path) as pdf:
-            for page_index, page in enumerate(pdf.pages, 1):
-                for line in (page.extract_text() or '').split('\n'):
-                    record = _record(line, f'第{page_index}页', page=page_index, source_kind='pdf')
-                    if record:
-                        out.append(record)
-        return out
+        return _read_pdf_records(path)
     if ext in ('.png', '.jpg', '.jpeg', '.webp', '.bmp'):
         return _read_image_records(path)
     if ext == '.txt':

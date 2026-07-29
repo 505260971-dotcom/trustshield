@@ -14,12 +14,18 @@ from fastapi.staticfiles import StaticFiles
 
 from . import store
 from .auth import current_user, require, router as auth_router
-from .config import CORS_ORIGINS, LLM_API_BASE, LLM_API_KEY, LLM_MODEL, UPLOAD_DIR, configured_llm, secure_runtime_ready
+from .config import (
+    CORS_ORIGINS, EMBEDDING_ALLOW_REMOTE_FINANCIAL_DATA, EMBEDDING_ENABLED,
+    EMBEDDING_MODEL, FINANCIAL_LLM_MODEL, LLM_API_BASE, LLM_API_KEY, LLM_MODEL,
+    RERANK_ALLOW_REMOTE_FINANCIAL_DATA, RERANK_ENABLED, RERANK_MODEL, UPLOAD_DIR,
+    configured_embedding, configured_financial_llm, configured_llm, configured_rerank,
+    ensure_model_runtime_config_file, secure_runtime_ready,
+)
 from .services.export_docx import export_revised_docx
 from .services.integrations import APPROVAL_ROLES, crm, oa
 from .services.translate import run_translate
 from .services.credit import assess_credit_compliance, assess_customer_binding
-from .services.parse import parse_contract
+from .services.parse import PARSER_VERSION, parse_contract, read_paragraphs, text_asset_status
 
 app = FastAPI(title='ContractGuard 合同评审协作中心', version='3.0')
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=['GET','POST','PATCH','DELETE'], allow_headers=['Authorization','Content-Type'])
@@ -46,6 +52,9 @@ def _assert_credit_access(case_id: str, user: dict) -> dict:
 @app.on_event('startup')
 def _startup():
     store.init_db()
+    # config.json is the sole runtime model configuration source.  This also
+    # upgrades the earlier encrypted-file format to the requested plain JSON.
+    ensure_model_runtime_config_file()
 
 @app.get('/api/health')
 async def health(user=Depends(current_user)):
@@ -101,6 +110,46 @@ async def rule_version_publish(version: str, user=Depends(require('admin:cases')
     store.audit(user, 'rules.publish', 'rule_version', version)
     return result
 
+
+@app.get('/api/admin/credit-route-versions')
+async def credit_route_versions(user=Depends(require('admin:cases'))):
+    return {'items': store.list_credit_route_versions()}
+
+
+@app.post('/api/admin/credit-route-versions')
+async def credit_route_draft_create(user=Depends(require('admin:cases'))):
+    result = store.create_credit_route_draft(user)
+    store.audit(user, 'credit_route.draft_create', 'credit_route_version', result['version'])
+    return result
+
+
+@app.get('/api/admin/credit-route-versions/{version}')
+async def credit_route_version_get(version: str, user=Depends(require('admin:cases'))):
+    result = store.get_credit_route_version(version)
+    if not result.get('version'):
+        raise HTTPException(404, '信审批核路由版本不存在')
+    return result
+
+
+@app.patch('/api/admin/credit-route-versions/{version}')
+async def credit_route_version_update(version: str, body: dict, user=Depends(require('admin:cases'))):
+    try:
+        result = store.update_credit_route_version(version, body.get('config') or body, user)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit(user, 'credit_route.update', 'credit_route_version', version, {'fields': list((body.get('config') or body).keys())})
+    return result
+
+
+@app.post('/api/admin/credit-route-versions/{version}/publish')
+async def credit_route_version_publish(version: str, user=Depends(require('admin:cases'))):
+    try:
+        result = store.publish_credit_route_version(version, user)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit(user, 'credit_route.publish', 'credit_route_version', version)
+    return result
+
 # Credit review is deliberately separate from contract review.  A contract can
 # read a published decision but cannot create, alter, or approve one.
 @app.get('/api/credit/decisions')
@@ -132,7 +181,7 @@ async def credit_case_update(case_id: str, body: dict, user=Depends(require('cre
         current = _assert_credit_access(case_id, user)
         conditions = body['conditions'] if 'conditions' in body else current['conditions']
         request_note = body['request_note'] if 'request_note' in body else current.get('request_note', '')
-        result = store.update_credit_case(case_id, conditions, request_note, user)
+        result = store.update_credit_case(case_id, conditions, request_note, user, body.get('reviewer_note', ''))
         if 'business_type' in body:
             result = store.set_credit_business_type(case_id, body.get('business_type'), user)
     except ValueError as e:
@@ -152,6 +201,17 @@ async def credit_case_decision(case_id: str, body: dict, user=Depends(require('c
     try: result = store.decide_credit_case(case_id, body.get('decision', ''), body.get('note', ''), user)
     except ValueError as e: raise HTTPException(400, str(e))
     store.audit(user, 'credit.decision', 'credit_case', case_id, {'decision': body.get('decision')})
+    return result
+
+
+@app.post('/api/credit/cases/{case_id}/resubmit')
+async def credit_case_resubmit(case_id: str, user=Depends(require('credit:create'))):
+    _assert_credit_access(case_id, user)
+    try:
+        result = store.resubmit_credit_case(case_id, user)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit(user, 'credit.resubmit', 'credit_case', case_id)
     return result
 
 
@@ -185,6 +245,19 @@ async def credit_document_upload(case_id: str, file: UploadFile=File(...), docum
         if os.path.exists(path):
             os.remove(path)
         raise HTTPException(400, str(exc))
+    # Build the encrypted text asset at upload time.  A source file remains
+    # available even if local OCR is not installed; the status tells reviewers
+    # exactly why it cannot yet participate in text/RAG extraction.
+    try:
+        records = await asyncio.to_thread(read_paragraphs, path)
+        text_status = text_asset_status(records)
+        await asyncio.to_thread(store.save_credit_document_text_asset, item['document_id'], item['content_hash'], records, PARSER_VERSION, text_status)
+        item['text_status'] = text_status
+        item['text_record_count'] = len(records)
+    except Exception as exc:
+        await asyncio.to_thread(store.save_credit_document_text_asset, item['document_id'], item['content_hash'], None, PARSER_VERSION, 'failed', str(exc))
+        item['text_status'] = 'failed'
+        item['text_error'] = str(exc)[:300]
     store.audit(user, 'credit.document_upload', 'credit_case', case_id, {'document_id': item['document_id'], 'document_type': document_type})
     return item
 
@@ -218,6 +291,11 @@ async def credit_exposure_save(case_id: str, body: dict, user=Depends(require('c
 def _run_credit_assessment(assessment_id: str):
     job = CREDIT_JOBS[assessment_id]
     try:
+        # ``run_credit_assessment`` can legitimately spend longer than one UI
+        # polling window in its first remote ReAct turn.  Publish an immediate
+        # heartbeat so an empty step list is never mistaken for a dead worker.
+        job['steps'].append('任务已启动：正在载入信审材料与 CRM/ERP 敞口快照')
+        job['steps'].append('正在执行生产 ReAct Agent；单轮模型调用最长可能等待 45 秒')
         from .graph.credit_graph import run_credit_assessment
         case = store.get_credit_case(job['case_id'])
         documents = [store.get_credit_document(job['case_id'], item['document_id']) for item in store.list_credit_documents(job['case_id'])]
@@ -246,10 +324,50 @@ async def credit_assessment_start(case_id: str, body: dict | None=None, user=Dep
         assessment = store.start_credit_assessment(case_id, user, str((body or {}).get('model_version') or ''))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    CREDIT_JOBS[assessment['assessment_id']] = {'status': 'running', 'case_id': case_id, 'model_version': assessment['model_version'], 'steps': [], 'result': None, 'error': ''}
+    CREDIT_JOBS[assessment['assessment_id']] = {
+        'status': 'running', 'case_id': case_id, 'model_version': assessment['model_version'],
+        'steps': [], 'result': None, 'error': '', 'started_at': time.time(),
+    }
     threading.Thread(target=_run_credit_assessment, args=(assessment['assessment_id'],), daemon=True).start()
     store.audit(user, 'credit.assessment_start', 'credit_assessment', assessment['assessment_id'], {'case_id': case_id, 'model_version': assessment['model_version']})
     return assessment
+
+
+@app.get('/api/credit/runtime-readiness')
+async def credit_runtime_readiness(user=Depends(require('credit:manage'))):
+    """Expose non-secret readiness information to the credit reviewer.
+
+    This makes a deliberately fail-closed rerank path diagnosable before a
+    reviewer uploads financial material.  No key, endpoint credential, or
+    customer data is returned.
+    """
+    financial_ready = configured_financial_llm()
+    rerank_ready = configured_rerank()
+    embedding_ready = configured_embedding()
+    return {
+        'financial_llm': {
+            'ready': financial_ready,
+            'model': FINANCIAL_LLM_MODEL if financial_ready else '',
+            'message': '已就绪' if financial_ready else '未配置 FINANCIAL_LLM_* 或主 LLM_*',
+        },
+        'rerank': {
+            'ready': rerank_ready,
+            'enabled': RERANK_ENABLED,
+            'data_transfer_authorized': RERANK_ALLOW_REMOTE_FINANCIAL_DATA,
+            'model': RERANK_MODEL,
+            'message': ('已就绪' if rerank_ready else
+                        '未启用或未配置 DashScope qwen3-rerank；生产 ReAct 检索会安全失败，不会降级为本地词法排序'),
+        },
+        'embedding': {
+            'ready': embedding_ready,
+            'enabled': EMBEDDING_ENABLED,
+            'data_transfer_authorized': EMBEDDING_ALLOW_REMOTE_FINANCIAL_DATA,
+            'model': EMBEDDING_MODEL,
+            'message': ('已就绪：与词法召回做 RRF 融合，再交由 qwen3-rerank 精排' if embedding_ready else
+                        '未启用或未配置 embedding；当前使用受控词法召回后交由 qwen3-rerank 精排'),
+        },
+        'production_ready': financial_ready and rerank_ready and (not EMBEDDING_ENABLED or embedding_ready),
+    }
 
 
 @app.get('/api/credit/cases/{case_id}/assessments/latest')
@@ -286,16 +404,39 @@ async def credit_assessment_apply(case_id: str, assessment_id: str, user=Depends
     if not assessment or assessment.get('case_id') != case_id or assessment.get('status') != 'done':
         raise HTTPException(409, '尚无可应用的已完成信审评估')
     result = assessment.get('report') or {}
+    if result.get('runtime_mode') != 'production':
+        raise HTTPException(409, '该信审结果不是生产 ReAct 审计快照，不能应用、审批或绑定合同')
     analysis = result.get('assessment') or {}
     if analysis.get('model_status') != 'ready_for_reviewer' or any(item.get('level') == 'high' for item in analysis.get('risk_flags') or []):
         raise HTTPException(409, '评估存在材料缺失或高风险阻断，不能直接应用建议条件')
     try:
-        updated = store.update_credit_case(case_id, analysis.get('recommendation') or current['conditions'], current.get('request_note', ''), user)
-        updated = store.set_credit_business_type(case_id, analysis.get('business_type') or current.get('business_type', '一般'), user)
+        updated = store.record_credit_reviewer_decision(
+            case_id, assessment, analysis.get('recommendation') or current['conditions'], '', 'agent_recommended', user,
+            analysis.get('business_type') or current.get('business_type', '一般'),
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     store.audit(user, 'credit.assessment_apply', 'credit_case', case_id, {'assessment_id': assessment_id, 'model_version': result.get('model_version')})
     return updated
+
+
+@app.post('/api/credit/cases/{case_id}/assessments/{assessment_id}/reviewer-decision')
+async def credit_reviewer_decision(case_id: str, assessment_id: str, body: dict, user=Depends(require('credit:manage'))):
+    """Persist an accountable reviewer adjustment or fallback before approval."""
+    current = _assert_credit_access(case_id, user)
+    assessment = store.get_credit_assessment(assessment_id)
+    try:
+        result = store.record_credit_reviewer_decision(
+            case_id, assessment, body.get('conditions') or current['conditions'], body.get('reviewer_note', ''),
+            body.get('mode', 'reviewer_adjusted'), user, body.get('business_type') or current.get('business_type', '一般'),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    store.audit(user, 'credit.reviewer_decision', 'credit_case', case_id, {
+        'assessment_id': assessment_id, 'mode': result.get('review_mode'),
+        'has_reviewer_note': bool(result.get('reviewer_note')),
+    })
+    return result
 
 # ---- Case centre: the primary OA surface ----
 @app.get('/api/workbench/tasks')

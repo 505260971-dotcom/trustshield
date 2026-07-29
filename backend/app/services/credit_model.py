@@ -26,7 +26,10 @@ DEFAULT_MODEL_CONFIG = {
         {'grade': 'C', 'minimum_score': 55, 'limit_multiplier': 0.40, 'revenue_cap_ratio': 0.04},
         {'grade': 'D', 'minimum_score': 0, 'limit_multiplier': 0.0, 'revenue_cap_ratio': 0.0},
     ],
-    'minimum_fact_coverage': 0.55,
+    # Production ReAct only calls this engine with all core Claims verified.
+    # Keep the policy itself equally strict so a future caller cannot silently
+    # turn partial extraction into an automatic recommendation.
+    'minimum_fact_coverage': 1.0,
     'overdue_lock_days': 30,
 }
 
@@ -137,10 +140,13 @@ def recommend_conditions(requested: dict[str, Any], facts: dict[str, Any], expos
     requested = requested or {}
     requested_limit = max(0, _number(requested.get('max_credit_amount')) or 0)
     revenue = max(0, _number(facts.get('revenue')) or 0)
+    requested_currency = str(requested.get('currency') or facts.get('currency') or 'CNY').upper()
+    financial_currency = str(facts.get('financial_currency') or '').upper()
     exposure = exposure or {}
+    exposure_currency = str(exposure.get('currency') or '').upper()
     current_exposure = max(0, (_number(exposure.get('current_receivables')) or 0) + (_number(exposure.get('booked_order_amount')) or 0))
     overdue_days = int(_number(exposure.get('overdue_days')) or 0)
-    min_coverage = float(config.get('minimum_fact_coverage', .55))
+    min_coverage = float(config.get('minimum_fact_coverage', 1.0))
     lock_days = int(config.get('overdue_lock_days', 30))
     risk_flags: list[dict[str, str]] = []
     if scorecard['coverage'] < min_coverage:
@@ -149,6 +155,12 @@ def recommend_conditions(requested: dict[str, Any], facts: dict[str, Any], expos
         risk_flags.append({'code': 'OVERDUE_LOCK', 'level': 'high', 'message': f'客户逾期 {overdue_days} 天，超过制度锁定阈值 {lock_days} 天。'})
     if str(facts.get('audit_opinion') or '').lower() in {'qualified', 'adverse', 'disclaimer'}:
         risk_flags.append({'code': 'AUDIT_OPINION', 'level': 'high', 'message': '审计意见存在保留、否定或无法表示意见，须人工专项复核。'})
+    if financial_currency and requested_currency and financial_currency != requested_currency:
+        risk_flags.append({'code': 'FINANCIAL_CURRENCY_MISMATCH', 'level': 'high',
+                           'message': f'财报金额口径为 {financial_currency}，申请授信币种为 {requested_currency}；未提供经批准汇率，不能自动换算授信额度。'})
+    if exposure_currency and requested_currency and exposure_currency != requested_currency:
+        risk_flags.append({'code': 'EXPOSURE_CURRENCY_MISMATCH', 'level': 'high',
+                           'message': f'应收/订单敞口币种为 {exposure_currency}，申请授信币种为 {requested_currency}；未提供经批准汇率，不能自动计算可用额度。'})
 
     can_recommend = not risk_flags and revenue > 0 and requested_limit > 0
     revenue_cap = revenue * float(grade.get('revenue_cap_ratio', 0))
@@ -181,7 +193,7 @@ def recommend_conditions(requested: dict[str, Any], facts: dict[str, Any], expos
         'recommendation': {
             'max_credit_amount': round(recommended_limit, 2),
             'available_credit_amount': round(available_after_existing, 2),
-            'currency': str(requested.get('currency') or facts.get('currency') or 'CNY').upper(),
+            'currency': requested_currency,
             'max_payment_days': recommended_days, 'min_prepayment_ratio': round(recommended_prepay, 2),
             'allowed_payment_methods': requested.get('allowed_payment_methods') or ['bank_transfer'],
             'allow_vmi_jit': bool(requested.get('allow_vmi_jit', False)),

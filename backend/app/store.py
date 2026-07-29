@@ -117,12 +117,24 @@ def init_db():
           original_name TEXT NOT NULL, stored_path TEXT NOT NULL, content_hash TEXT NOT NULL,
           uploaded_by TEXT, created_at REAL NOT NULL
         );
+        /* Source documents stay on disk unchanged.  Their normalized text,
+           table rows and OCR records are encrypted separately so retrieval is
+           reproducible without turning the original into an editable artifact. */
+        CREATE TABLE IF NOT EXISTS credit_document_text_assets (
+          document_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, parser_version TEXT NOT NULL,
+          status TEXT NOT NULL, records_encrypted BLOB, error TEXT NOT NULL DEFAULT '',
+          created_at REAL NOT NULL, updated_at REAL NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS credit_exposure_snapshots (
           snapshot_id TEXT PRIMARY KEY, case_id TEXT NOT NULL, source TEXT NOT NULL,
           payload_encrypted BLOB NOT NULL, captured_at REAL NOT NULL, created_by TEXT,
           created_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS credit_model_versions (
+          version TEXT PRIMARY KEY, status TEXT NOT NULL, config_json TEXT NOT NULL,
+          created_by TEXT, created_at REAL NOT NULL, published_at REAL
+        );
+        CREATE TABLE IF NOT EXISTS credit_route_versions (
           version TEXT PRIMARY KEY, status TEXT NOT NULL, config_json TEXT NOT NULL,
           created_by TEXT, created_at REAL NOT NULL, published_at REAL
         );
@@ -178,8 +190,10 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_rule_definitions_version ON rule_definitions(version);
         CREATE INDEX IF NOT EXISTS idx_credit_customer ON credit_cases(customer_key, status, version DESC);
         CREATE INDEX IF NOT EXISTS idx_credit_documents_case ON credit_documents(case_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_credit_document_text_status ON credit_document_text_assets(status, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_credit_exposure_case ON credit_exposure_snapshots(case_id, captured_at DESC);
         CREATE INDEX IF NOT EXISTS idx_credit_assessments_case ON credit_assessments(case_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_credit_route_versions_status ON credit_route_versions(status, published_at DESC);
         CREATE INDEX IF NOT EXISTS idx_credit_evidence_assessment ON credit_evidence(assessment_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_translations_job ON translations(job_id);
         CREATE INDEX IF NOT EXISTS idx_attachments_job ON case_attachments(job_id);
@@ -199,10 +213,31 @@ def init_db():
         _add_column(c, 'credit_cases', 'director_by TEXT')
         _add_column(c, 'credit_cases', 'director_at REAL')
         _add_column(c, 'credit_cases', "business_type TEXT NOT NULL DEFAULT '一般'")
+        # A published credit decision must retain both the Agent/model basis
+        # and the reviewer's final commercial terms.  This prevents a manual
+        # edit from silently disconnecting an approval from its evidence.
+        _add_column(c, 'credit_cases', "assessment_id TEXT NOT NULL DEFAULT ''")
+        _add_column(c, 'credit_cases', "assessment_snapshot_json TEXT NOT NULL DEFAULT '{}'")
+        _add_column(c, 'credit_cases', "review_mode TEXT NOT NULL DEFAULT ''")
+        _add_column(c, 'credit_cases', "reviewer_note TEXT NOT NULL DEFAULT ''")
+        _add_column(c, 'credit_cases', 'reviewed_by TEXT')
+        _add_column(c, 'credit_cases', 'reviewed_at REAL')
+        # Credit approval is a closed loop.  A supervisor or final approver
+        # can return an application to the business requester or reviewer
+        # without destroying its assessment, evidence, or approval history.
+        _add_column(c, 'credit_cases', "return_note TEXT NOT NULL DEFAULT ''")
+        _add_column(c, 'credit_cases', "return_target TEXT NOT NULL DEFAULT ''")
+        _add_column(c, 'credit_cases', 'returned_by TEXT')
+        _add_column(c, 'credit_cases', 'returned_at REAL')
+        _add_column(c, 'credit_cases', "route_version TEXT NOT NULL DEFAULT ''")
+        _add_column(c, 'credit_cases', "route_snapshot_json TEXT NOT NULL DEFAULT '{}'")
         for definition in ('assigned_to TEXT', "priority TEXT NOT NULL DEFAULT 'normal'", 'due_at REAL', "request_note TEXT NOT NULL DEFAULT ''"):
             _add_column(c, 'contract_cases', definition)
         for definition in ("customer_name TEXT NOT NULL DEFAULT ''", "current_stage TEXT NOT NULL DEFAULT 'draft'", "credit_case_id TEXT NOT NULL DEFAULT ''", 'closed_at REAL'):
             _add_column(c, 'contract_cases', definition)
+        # Runtime model configuration now has one home: backend/data/config.json.
+        # This old table contained only provider settings and no business data.
+        c.execute('DROP TABLE IF EXISTS runtime_settings')
         # Role-model migration (v4): the original credit/legal/CEO demo
         # roles are consolidated into the Dongjiang approval hierarchy.  This
         # runs idempotently on startup so existing local accounts, pending
@@ -237,6 +272,7 @@ def init_db():
     _seed_initial_admin()
     _seed_rule_catalog()
     _seed_credit_model()
+    _seed_credit_route_catalog()
 
 def _seed_rule_catalog():
     """Migrate the original immutable source list into the first published catalog."""
@@ -255,6 +291,28 @@ def _seed_rule_catalog():
                        rule.get('template', ''), None, now))
 
 
+DEFAULT_CREDIT_ROUTE_CONFIG = {
+    'director_required': True,
+    'final_threshold_amount': 3_000_000,
+    'final_threshold_payment_days': 60,
+    'final_threshold_prepayment_ratio': 50,
+    'final_on_manual_override': True,
+    'final_on_acceptance_bill': True,
+    'final_on_vmi_jit': True,
+}
+
+
+def _seed_credit_route_catalog():
+    """Seed a separately versioned, publish-only credit approval route."""
+    with _lock, _conn() as c:
+        found = c.execute("SELECT 1 FROM credit_route_versions WHERE version='credit-route-v1'").fetchone()
+        if not found:
+            now = time.time()
+            c.execute('INSERT INTO credit_route_versions VALUES (?,?,?,?,?,?)', (
+                'credit-route-v1', 'published', json.dumps(DEFAULT_CREDIT_ROUTE_CONFIG, ensure_ascii=False), None, now, now,
+            ))
+
+
 def _seed_credit_model():
     """Seed an explainable scorecard, not a black-box approval model.
 
@@ -269,6 +327,97 @@ def _seed_credit_model():
         now = time.time()
         c.execute('INSERT INTO credit_model_versions VALUES (?,?,?,?,?,?)',
                   (DEFAULT_MODEL_VERSION, 'published', json.dumps(DEFAULT_MODEL_CONFIG, ensure_ascii=False), None, now, now))
+
+
+def _normalize_credit_route_config(raw: dict | None) -> dict:
+    value = {**DEFAULT_CREDIT_ROUTE_CONFIG, **(raw or {})}
+    try:
+        value['final_threshold_amount'] = max(0.0, float(value['final_threshold_amount']))
+        value['final_threshold_payment_days'] = max(0, int(value['final_threshold_payment_days']))
+        value['final_threshold_prepayment_ratio'] = min(100.0, max(0.0, float(value['final_threshold_prepayment_ratio'])))
+    except (TypeError, ValueError) as exc:
+        raise ValueError('信审批核阈值必须是有效数字') from exc
+    for key in ('director_required', 'final_on_manual_override', 'final_on_acceptance_bill', 'final_on_vmi_jit'):
+        value[key] = bool(value[key])
+    return value
+
+
+def list_credit_route_versions():
+    init_db()
+    with _lock, _conn() as c:
+        return [dict(row) for row in c.execute('SELECT version,status,created_by,created_at,published_at FROM credit_route_versions ORDER BY created_at DESC')]
+
+
+def get_credit_route_version(version: str='') -> dict:
+    init_db()
+    with _lock, _conn() as c:
+        if not version:
+            row = c.execute("SELECT * FROM credit_route_versions WHERE status='published' ORDER BY published_at DESC LIMIT 1").fetchone()
+        else:
+            row = c.execute('SELECT * FROM credit_route_versions WHERE version=?', (version,)).fetchone()
+    if not row:
+        return {'version': '', 'status': '', 'config': dict(DEFAULT_CREDIT_ROUTE_CONFIG)}
+    item = dict(row); item['config'] = _normalize_credit_route_config(json.loads(item.pop('config_json') or '{}'))
+    return item
+
+
+def create_credit_route_draft(actor: dict) -> dict:
+    current = get_credit_route_version()
+    with _lock, _conn() as c:
+        n = c.execute('SELECT COUNT(*) AS n FROM credit_route_versions').fetchone()['n']
+        version = f'credit-route-v{n + 1}'; now = time.time()
+        c.execute('INSERT INTO credit_route_versions VALUES (?,?,?,?,?,?)', (
+            version, 'draft', json.dumps(current['config'], ensure_ascii=False), actor.get('id'), now, None,
+        ))
+    return get_credit_route_version(version)
+
+
+def update_credit_route_version(version: str, config: dict, actor: dict) -> dict:
+    normalized = _normalize_credit_route_config(config)
+    with _lock, _conn() as c:
+        row = c.execute('SELECT status FROM credit_route_versions WHERE version=?', (version,)).fetchone()
+        if not row:
+            raise ValueError('信审批核路由版本不存在')
+        if row['status'] != 'draft':
+            raise ValueError('已发布信审批核路由不可编辑，请先创建草稿')
+        c.execute('UPDATE credit_route_versions SET config_json=? WHERE version=?', (json.dumps(normalized, ensure_ascii=False), version))
+    return get_credit_route_version(version)
+
+
+def publish_credit_route_version(version: str, actor: dict) -> dict:
+    with _lock, _conn() as c:
+        row = c.execute('SELECT status,config_json FROM credit_route_versions WHERE version=?', (version,)).fetchone()
+        if not row or row['status'] != 'draft':
+            raise ValueError('仅草稿信审批核路由可发布')
+        _normalize_credit_route_config(json.loads(row['config_json'] or '{}'))
+        now = time.time()
+        c.execute("UPDATE credit_route_versions SET status='archived' WHERE status='published'")
+        c.execute("UPDATE credit_route_versions SET status='published',published_at=? WHERE version=?", (now, version))
+    return get_credit_route_version(version)
+
+
+def _evaluate_credit_route(route: dict, conditions: dict, review_mode: str='') -> dict:
+    config = route['config']; reasons: list[str] = []
+    if not config['director_required']:
+        raise ValueError('当前信审批核路由未要求主管复核，配置无效')
+    if float(conditions.get('max_credit_amount') or 0) >= config['final_threshold_amount']:
+        reasons.append(f"额度≥{config['final_threshold_amount']:g}")
+    if int(conditions.get('max_payment_days') or 0) >= config['final_threshold_payment_days']:
+        reasons.append(f"账期≥{config['final_threshold_payment_days']}天")
+    if float(conditions.get('min_prepayment_ratio') or 0) <= config['final_threshold_prepayment_ratio']:
+        reasons.append(f"预付款≤{config['final_threshold_prepayment_ratio']:g}%")
+    methods = set(conditions.get('allowed_payment_methods') or [])
+    if config['final_on_acceptance_bill'] and 'acceptance_bill' in methods:
+        reasons.append('包含承兑汇票')
+    if config['final_on_vmi_jit'] and bool(conditions.get('allow_vmi_jit')):
+        reasons.append('允许 VMI/JIT')
+    if config['final_on_manual_override'] and review_mode in {'reviewer_adjusted', 'manual_override'}:
+        reasons.append('人工修订/兜底报送')
+    return {'version': route['version'], 'config': config, 'requires_final': bool(reasons), 'reasons': reasons}
+
+
+def credit_route_for_case(conditions: dict, review_mode: str='', assessment_snapshot: dict | None=None) -> dict:
+    return _evaluate_credit_route(get_credit_route_version(), conditions, review_mode)
 
 def _rule_rows(version: str):
     with _lock, _conn() as c:
@@ -346,6 +495,8 @@ def _credit_case(row) -> dict | None:
         return None
     item = dict(row)
     item['conditions'] = json.loads(item.pop('conditions_json') or '{}')
+    item['assessment_snapshot'] = json.loads(item.pop('assessment_snapshot_json', '') or '{}')
+    item['route_snapshot'] = json.loads(item.pop('route_snapshot_json', '') or '{}')
     return item
 
 def _customer_key(customer_name: str) -> str:
@@ -401,19 +552,27 @@ def create_credit_case(customer_name: str, conditions: dict, request_note: str, 
                     (request_note or '').strip()[:2000], '', actor.get('id'), now, now, business_type))
     return get_credit_case(case_id)
 
-def update_credit_case(case_id: str, conditions: dict, request_note: str, actor: dict) -> dict:
+def update_credit_case(case_id: str, conditions: dict, request_note: str, actor: dict, reviewer_note: str='') -> dict:
     from .services.credit import normalize_conditions
     if actor.get('role') not in {'reviewer', 'admin'}:
         raise ValueError('仅信用审核专员可评估并修改信审条件')
     normal = normalize_conditions(conditions)
     with _lock, _conn() as c:
-        row = c.execute('SELECT status FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
+        row = c.execute('SELECT status,assessment_snapshot_json,review_mode FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
         if not row:
             raise ValueError('信审案件不存在')
-        if row['status'] != 'draft':
-            raise ValueError('仅草稿信审案件可修改；放宽条件请新建信审版本')
-        c.execute('UPDATE credit_cases SET conditions_json=?,request_note=?,updated_at=? WHERE case_id=?',
-                  (json.dumps(normal, ensure_ascii=False), (request_note or '').strip()[:2000], time.time(), case_id))
+        if row['status'] not in {'draft', 'returned_to_reviewer'}:
+            raise ValueError('仅草稿或退回审核专员的信审案件可修改；放宽已生效条件请新建信审版本')
+        snapshot = json.loads(row['assessment_snapshot_json'] or '{}')
+        recommended = snapshot.get('recommendation') or {}
+        adjusted = bool(recommended and normal != normalize_conditions(recommended))
+        if adjusted and not (reviewer_note or '').strip():
+            raise ValueError('调整 Agent/模型建议条件时，必须填写审核专员修订依据')
+        mode = 'reviewer_adjusted' if adjusted else row['review_mode']
+        c.execute('''UPDATE credit_cases SET status='draft',conditions_json=?,request_note=?,review_mode=?,reviewer_note=?,reviewed_by=?,reviewed_at=?,return_note='',return_target='',returned_by=NULL,returned_at=NULL,updated_at=? WHERE case_id=?''',
+                  (json.dumps(normal, ensure_ascii=False), (request_note or '').strip()[:2000], mode,
+                   (reviewer_note or '').strip()[:2000] if adjusted else '', actor.get('id') if adjusted else None,
+                   time.time() if adjusted else None, time.time(), case_id))
     return get_credit_case(case_id)
 
 
@@ -427,27 +586,116 @@ def set_credit_business_type(case_id: str, business_type: str, actor: dict) -> d
         row = c.execute('SELECT status FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
         if not row:
             raise ValueError('信审案件不存在')
-        if row['status'] != 'draft':
-            raise ValueError('仅草稿信审案件可调整业务类型')
+        if row['status'] not in {'draft', 'returned_to_reviewer'}:
+            raise ValueError('仅草稿或退回审核专员的信审案件可调整业务类型')
         c.execute('UPDATE credit_cases SET business_type=?,updated_at=? WHERE case_id=?', (value, time.time(), case_id))
     return get_credit_case(case_id)
 
-def submit_credit_case(case_id: str, actor: dict) -> dict:
+def _assessment_snapshot(assessment: dict) -> dict:
+    """Keep a concise, immutable approval basis rather than a mutable latest report."""
+    report = assessment.get('report') or {}
+    analysis = report.get('assessment') or {}
+    audit = report.get('audit_runtime') or {}
+    return {
+        'assessment_id': assessment.get('assessment_id'), 'assessment_status': assessment.get('status'),
+        'model_version': assessment.get('model_version'), 'policy_version': assessment.get('policy_version'),
+        'runtime_mode': report.get('runtime_mode'), 'agent_status': audit.get('status'),
+        'model_status': analysis.get('model_status'), 'recommendation': analysis.get('recommendation') or {},
+        'risk_flags': analysis.get('risk_flags') or [], 'completed_at': assessment.get('completed_at'),
+    }
+
+
+def record_credit_reviewer_decision(case_id: str, assessment: dict, conditions: dict, reviewer_note: str,
+                                    mode: str, actor: dict, business_type: str='') -> dict:
+    """Record how a reviewer adopted or overrode a production assessment.
+
+    ``agent_recommended`` is allowed only for a complete, non-blocked production
+    result.  An ``reviewer_adjusted`` or ``manual_override`` always retains the
+    assessment snapshot and requires an explicit accountable reason.
+    """
+    from .services.credit import normalize_conditions
     if actor.get('role') not in {'reviewer', 'admin'}:
-        raise ValueError('仅信用审核专员可提交信审评估')
+        raise ValueError('仅信用审核专员可确认或修订信审建议')
+    if mode not in {'agent_recommended', 'reviewer_adjusted', 'manual_override'}:
+        raise ValueError('信审处理方式无效')
+    if not assessment or assessment.get('case_id') != case_id or assessment.get('status') not in {'done', 'error'}:
+        raise ValueError('请先运行本案件的信审评估，再确认或修订条件')
+    snapshot = _assessment_snapshot(assessment)
+    analysis = (assessment.get('report') or {}).get('assessment') or {}
+    production_ready = (assessment.get('status') == 'done' and snapshot.get('runtime_mode') == 'production'
+                        and analysis.get('model_status') == 'ready_for_reviewer'
+                        and not any(item.get('level') == 'high' for item in analysis.get('risk_flags') or []))
+    note = (reviewer_note or '').strip()
+    final_conditions = normalize_conditions(conditions)
+    recommendation = normalize_conditions(analysis.get('recommendation') or {}) if analysis.get('recommendation') else {}
+    if mode == 'agent_recommended':
+        if not production_ready:
+            raise ValueError('该评估尚不能作为直接报送建议；请补充材料，或填写人工修订依据后报送')
+        if final_conditions != recommendation:
+            raise ValueError('采用 Agent/模型建议时，报送条件必须与建议一致；调整请使用“人工修订”')
+    else:
+        if not note:
+            raise ValueError('Agent 建议不适用或运行异常时，必须填写审核专员修订依据')
+        if snapshot.get('runtime_mode') != 'production' and assessment.get('status') != 'error':
+            raise ValueError('只能依据生产 ReAct 审计快照进行人工修订')
+        if mode == 'reviewer_adjusted' and not production_ready:
+            # A failed/blocked assessment is a manual fallback, not an ordinary
+            # fine-tuning of a trustworthy recommendation.
+            mode = 'manual_override'
+    now = time.time()
     with _lock, _conn() as c:
         row = c.execute('SELECT status FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
         if not row:
             raise ValueError('信审案件不存在')
-        if row['status'] != 'draft':
-            raise ValueError('仅草稿信审案件可提交')
+        if row['status'] not in {'draft', 'returned_to_reviewer'}:
+            raise ValueError('仅草稿或退回审核专员的信审案件可确认或修订建议')
+        business = str(business_type or '').strip()
+        if business and business not in {'TKM', 'TKP', '模具制作', '注塑组件制造', '一般'}:
+            raise ValueError('业务类型无效')
+        fields = '''conditions_json=?,assessment_id=?,assessment_snapshot_json=?,review_mode=?,reviewer_note=?,reviewed_by=?,reviewed_at=?,updated_at=?'''
+        values: list[Any] = [json.dumps(final_conditions, ensure_ascii=False), assessment.get('assessment_id') or '',
+                             json.dumps(snapshot, ensure_ascii=False), mode, note[:2000], actor.get('id'), now, now]
+        if business:
+            fields += ',business_type=?'; values.append(business)
+        values.append(case_id)
+        fields = "status='draft',return_note='',return_target='',returned_by=NULL,returned_at=NULL," + fields
+        c.execute(f'UPDATE credit_cases SET {fields} WHERE case_id=?', values)
+    return get_credit_case(case_id)
+
+
+def submit_credit_case(case_id: str, actor: dict) -> dict:
+    if actor.get('role') not in {'reviewer', 'admin'}:
+        raise ValueError('仅信用审核专员可提交信审评估')
+    # Fetch the published route before acquiring the case-write lock.  The
+    # storage backend intentionally uses a non-reentrant lock, so querying a
+    # versioned policy from within that critical section would deadlock.
+    route_catalog = get_credit_route_version()
+    with _lock, _conn() as c:
+        row = c.execute('SELECT status,review_mode,reviewer_note,assessment_id,assessment_snapshot_json,conditions_json FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
+        if not row:
+            raise ValueError('信审案件不存在')
+        if row['status'] not in {'draft', 'returned_to_reviewer'}:
+            raise ValueError('仅草稿或退回审核专员的信审案件可提交')
+        if row['review_mode'] not in {'agent_recommended', 'reviewer_adjusted', 'manual_override'} or not row['assessment_id']:
+            raise ValueError('请先确认生产 Agent/模型建议；若建议不适用或 Agent 异常，请填写人工修订依据后再报送')
+        if row['review_mode'] in {'reviewer_adjusted', 'manual_override'} and not (row['reviewer_note'] or '').strip():
+            raise ValueError('人工修订或 Agent 异常报送必须填写审核专员修订依据')
+        snapshot = json.loads(row['assessment_snapshot_json'] or '{}')
+        if row['review_mode'] == 'agent_recommended':
+            recommended = snapshot.get('recommendation') or {}
+            from .services.credit import normalize_conditions
+            if not recommended or normalize_conditions(json.loads(row['conditions_json'] or '{}')) != normalize_conditions(recommended):
+                raise ValueError('报送条件已偏离 Agent/模型建议，请填写审核专员修订依据后重新确认')
         now = time.time()
-        c.execute("UPDATE credit_cases SET status='pending_director',submitted_at=?,updated_at=? WHERE case_id=?", (now, now, case_id))
+        conditions = json.loads(row['conditions_json'] or '{}')
+        route = _evaluate_credit_route(route_catalog, conditions, row['review_mode'])
+        c.execute("UPDATE credit_cases SET status='pending_director',submitted_at=?,route_version=?,route_snapshot_json=?,return_note='',return_target='',returned_by=NULL,returned_at=NULL,updated_at=? WHERE case_id=?",
+                  (now, route['version'], json.dumps(route, ensure_ascii=False), now, case_id))
     return get_credit_case(case_id)
 
 def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> dict:
-    if decision not in {'approved', 'rejected'}:
-        raise ValueError('信审决定仅支持 approved 或 rejected')
+    if decision not in {'approved', 'rejected', 'returned_to_reviewer', 'returned_to_business'}:
+        raise ValueError('信审决定仅支持通过、拒绝或退回修改/补材料')
     if not (note or '').strip():
         raise ValueError('请填写信审审批意见')
     with _lock, _conn() as c:
@@ -462,9 +710,19 @@ def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> d
             if decision == 'rejected':
                 c.execute('UPDATE credit_cases SET status=?,director_note=?,director_by=?,director_at=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
                           ('rejected', note.strip()[:2000], actor.get('id'), now, note.strip()[:2000], actor.get('id'), now, now, case_id))
+            elif decision.startswith('returned_'):
+                c.execute('''UPDATE credit_cases SET status=?,director_note=?,director_by=?,director_at=?,return_note=?,return_target=?,returned_by=?,returned_at=?,updated_at=? WHERE case_id=?''',
+                          (decision, note.strip()[:2000], actor.get('id'), now, note.strip()[:2000],
+                           'reviewer' if decision == 'returned_to_reviewer' else 'business', actor.get('id'), now, now, case_id))
             else:
-                c.execute("UPDATE credit_cases SET status='pending_final',director_note=?,director_by=?,director_at=?,updated_at=? WHERE case_id=?",
-                          (note.strip()[:2000], actor.get('id'), now, now, case_id))
+                route = json.loads(case['route_snapshot_json'] or '{}')
+                if route.get('requires_final'):
+                    c.execute("UPDATE credit_cases SET status='pending_final',director_note=?,director_by=?,director_at=?,updated_at=? WHERE case_id=?",
+                              (note.strip()[:2000], actor.get('id'), now, now, case_id))
+                else:
+                    c.execute("UPDATE credit_cases SET status='superseded',updated_at=? WHERE customer_key=? AND status='approved'", (now, case['customer_key']))
+                    c.execute('UPDATE credit_cases SET status=?,director_note=?,director_by=?,director_at=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
+                              ('approved', note.strip()[:2000], actor.get('id'), now, note.strip()[:2000], actor.get('id'), now, now, case_id))
         else:
             if case['status'] != 'pending_final':
                 raise ValueError('仅待最终审批的信审案件可作出决定')
@@ -475,8 +733,29 @@ def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> d
                 # A newly approved version supersedes the older decision.
                 # Contract reviews must be rerun against this new snapshot.
                 c.execute("UPDATE credit_cases SET status='superseded',updated_at=? WHERE customer_key=? AND status='approved'", (now, case['customer_key']))
-            c.execute('UPDATE credit_cases SET status=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
-                      (decision, note.strip()[:2000], actor.get('id'), now, now, case_id))
+            if decision.startswith('returned_'):
+                c.execute('''UPDATE credit_cases SET status=?,return_note=?,return_target=?,returned_by=?,returned_at=?,updated_at=? WHERE case_id=?''',
+                          (decision, note.strip()[:2000], 'reviewer' if decision == 'returned_to_reviewer' else 'business',
+                           actor.get('id'), now, now, case_id))
+            else:
+                c.execute('UPDATE credit_cases SET status=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
+                          (decision, note.strip()[:2000], actor.get('id'), now, now, case_id))
+    return get_credit_case(case_id)
+
+
+def resubmit_credit_case(case_id: str, actor: dict) -> dict:
+    """Return a business-material loop to the reviewer queue without bypassing review."""
+    if actor.get('role') not in {'business', 'reviewer', 'admin'}:
+        raise ValueError('当前角色不能重新提交信审申请')
+    with _lock, _conn() as c:
+        row = c.execute('SELECT status,created_by FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
+        if not row:
+            raise ValueError('信审案件不存在')
+        if row['status'] != 'returned_to_business':
+            raise ValueError('仅退回补材料的信审案件可重新提交')
+        if actor.get('role') == 'business' and row['created_by'] != actor.get('id'):
+            raise ValueError('仅申请人可重新提交该信审案件')
+        c.execute("UPDATE credit_cases SET status='draft',updated_at=? WHERE case_id=?", (time.time(), case_id))
     return get_credit_case(case_id)
 
 def require_active_credit_case(case_id: str) -> dict:
@@ -501,6 +780,41 @@ def _credit_document(row) -> dict | None:
     # Stored paths are an internal implementation detail and must never be
     # returned by list APIs to a browser.
     item.pop('stored_path', None)
+    return item
+
+
+def save_credit_document_text_asset(document_id: str, content_hash: str, records: list[dict] | None,
+                                    parser_version: str, status: str='ready', error: str='') -> None:
+    """Persist source-bound normalized text encrypted at rest.
+
+    ``records`` intentionally retains page/table/OCR anchors rather than a
+    flattened string.  That makes later RAG citations reproducible and avoids
+    re-running OCR for an unchanged upload.
+    """
+    init_db(); now = time.time()
+    payload = encrypt_json(records or []) if records is not None else None
+    with _lock, _conn() as c:
+        c.execute('''INSERT INTO credit_document_text_assets
+                     (document_id,content_hash,parser_version,status,records_encrypted,error,created_at,updated_at)
+                     VALUES (?,?,?,?,?,?,?,?)
+                     ON CONFLICT(document_id) DO UPDATE SET
+                       content_hash=excluded.content_hash, parser_version=excluded.parser_version,
+                       status=excluded.status, records_encrypted=excluded.records_encrypted,
+                       error=excluded.error, updated_at=excluded.updated_at''',
+                  (document_id, content_hash, parser_version, status, payload, str(error or '')[:1000], now, now))
+
+
+def get_credit_document_text_asset(document_id: str, content_hash: str='') -> dict | None:
+    init_db()
+    with _lock, _conn() as c:
+        row = c.execute('SELECT * FROM credit_document_text_assets WHERE document_id=?', (document_id,)).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    if content_hash and item.get('content_hash') != content_hash:
+        return None
+    blob = item.pop('records_encrypted', None)
+    item['records'] = decrypt_json(blob) if blob else []
     return item
 
 
@@ -531,14 +845,20 @@ def add_credit_document(case_id: str, document_type: str, original_name: str, st
 def list_credit_documents(case_id: str) -> list[dict]:
     init_db()
     with _lock, _conn() as c:
-        rows = c.execute('SELECT * FROM credit_documents WHERE case_id=? ORDER BY created_at DESC', (case_id,)).fetchall()
+        rows = c.execute('''SELECT d.*, a.status AS text_status, a.parser_version AS text_parser_version,
+                            a.updated_at AS text_updated_at, a.error AS text_error
+                            FROM credit_documents d LEFT JOIN credit_document_text_assets a ON a.document_id=d.document_id
+                            WHERE d.case_id=? ORDER BY d.created_at DESC''', (case_id,)).fetchall()
     return [_credit_document(row) for row in rows]
 
 
 def get_credit_document(case_id: str, document_id: str) -> dict | None:
     init_db()
     with _lock, _conn() as c:
-        row = c.execute('SELECT * FROM credit_documents WHERE case_id=? AND document_id=?', (case_id, document_id)).fetchone()
+        row = c.execute('''SELECT d.*, a.status AS text_status, a.parser_version AS text_parser_version,
+                           a.updated_at AS text_updated_at, a.error AS text_error
+                           FROM credit_documents d LEFT JOIN credit_document_text_assets a ON a.document_id=d.document_id
+                           WHERE d.case_id=? AND d.document_id=?''', (case_id, document_id)).fetchone()
     return dict(row) if row else None
 
 
@@ -703,7 +1023,10 @@ def authenticate(username: str, password: str):
 
 def update_user(user_id: str, display_name=None, role=None, active=None, password=None):
     fields=[]; values=[]
-    if display_name is not None: fields.append('display_name=?'); values.append(display_name.strip())
+    if display_name is not None:
+        name = str(display_name).strip()
+        if not name: raise ValueError('姓名不能为空')
+        fields.append('display_name=?'); values.append(name[:80])
     if role is not None:
         if role not in ROLES: raise ValueError('不支持的角色')
         fields.append('role=?'); values.append(role)
@@ -714,11 +1037,34 @@ def update_user(user_id: str, display_name=None, role=None, active=None, passwor
     with _lock, _conn() as c: c.execute(f'UPDATE users SET {",".join(fields)} WHERE id=?', values)
     return get_user(user_id)
 
+
+def active_admin_count(exclude_user_id: str='') -> int:
+    with _lock, _conn() as c:
+        sql = "SELECT COUNT(*) AS n FROM users WHERE role='admin' AND active=1"
+        args: tuple[str, ...] = ()
+        if exclude_user_id:
+            sql += ' AND id<>?'; args = (exclude_user_id,)
+        return int(c.execute(sql, args).fetchone()['n'])
+
+
+def delete_user(user_id: str) -> dict | None:
+    """Permanently remove a login identity.
+
+    Operational records deliberately retain their actor IDs for audit
+    continuity, but the credential-bearing user row is irreversibly removed.
+    """
+    target = get_user(user_id)
+    if not target:
+        return None
+    with _lock, _conn() as c:
+        c.execute('DELETE FROM users WHERE id=?', (user_id,))
+    return target
+
 # ---- case centre / controlled workflow ----
 
 CASE_STAGES = {
     'draft', 'awaiting_credit', 'ai_review', 'legal_review', 'awaiting_business',
-    'approval', 'ready_to_sign', 'archived', 'cancelled'
+    'approval', 'final_approval', 'ready_to_sign', 'archived', 'cancelled'
 }
 
 def _case_event(c, case_id: str, event_type: str, message: str, actor: dict | None=None, payload: dict | None=None):
@@ -835,6 +1181,10 @@ ACTION_TRANSITIONS = {
     'submit_approval': ({'legal_review'}, 'approval'),
     'ready_for_signing': ({'legal_review'}, 'ready_to_sign'),
     'approve_for_signing': ({'approval'}, 'ready_to_sign'),
+    'escalate_final': ({'approval'}, 'final_approval'),
+    'final_approve_for_signing': ({'final_approval'}, 'ready_to_sign'),
+    'return_to_reviewer': ({'approval', 'final_approval'}, 'legal_review'),
+    'return_to_business': ({'approval', 'final_approval'}, 'awaiting_business'),
     'archive': ({'ready_to_sign'}, 'archived'),
     'cancel': (CASE_STAGES - {'archived', 'cancelled'}, 'cancelled'),
 }
@@ -845,7 +1195,9 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
     action_roles = {
         'claim': {'reviewer', 'admin'}, 'request_material': {'reviewer', 'admin'},
         'submit_revision': {'business', 'reviewer', 'admin'}, 'submit_approval': {'reviewer', 'admin'},
-        'ready_for_signing': {'reviewer', 'admin'}, 'approve_for_signing': {'director', 'admin'}, 'archive': {'reviewer', 'admin'},
+        'ready_for_signing': {'reviewer', 'admin'}, 'approve_for_signing': {'director', 'admin'},
+        'escalate_final': {'director', 'admin'}, 'final_approve_for_signing': {'admin'},
+        'return_to_reviewer': {'director', 'admin'}, 'return_to_business': {'director', 'admin'}, 'archive': {'reviewer', 'admin'},
         'cancel': {'business', 'reviewer', 'admin'},
     }
     if actor.get('role') not in action_roles[action]:
@@ -859,7 +1211,7 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
         current = row['current_stage'] or row['status']; allowed, target = ACTION_TRANSITIONS[action]
         if current not in allowed:
             raise ValueError(f'案件当前处于“{current}”，不能执行“{action}”')
-        if action in {'ready_for_signing', 'approve_for_signing'}:
+        if action in {'ready_for_signing', 'approve_for_signing', 'final_approve_for_signing'}:
             pending_types = "('approval','material')" if action == 'ready_for_signing' else "('material')"
             pending = c.execute(f"SELECT COUNT(*) AS n FROM workflow_tasks WHERE case_id=? AND status='open' AND task_type IN {pending_types}", (case_id,)).fetchone()['n']
             if pending:
@@ -902,9 +1254,18 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
         elif action == 'submit_approval':
             c.execute("UPDATE workflow_tasks SET status='completed',completed_by=?,completed_at=? WHERE case_id=? AND task_type='legal_review' AND status='open'", (actor.get('id'), now, case_id))
             _task(c, case_id, 'approval', '合同例外审批', note or '请处理合同例外审批。', assignee_id or None, actor, row['due_at'])
-        elif action in {'ready_for_signing', 'approve_for_signing'}:
+        elif action in {'ready_for_signing', 'approve_for_signing', 'final_approve_for_signing'}:
             types = "('legal_review','approval')" if action == 'ready_for_signing' else "('approval')"
             c.execute(f"UPDATE workflow_tasks SET status='completed',completed_by=?,completed_at=? WHERE case_id=? AND status='open' AND task_type IN {types}", (actor.get('id'), now, case_id))
+        elif action == 'escalate_final':
+            c.execute("UPDATE workflow_tasks SET status='completed',completed_by=?,completed_at=? WHERE case_id=? AND status='open' AND task_type='approval'", (actor.get('id'), now, case_id))
+            _task(c, case_id, 'final_approval', '合同待最终审批', note or '主管复核后上报集团财务总监最终决策。', None, actor, row['due_at'])
+        elif action == 'return_to_reviewer':
+            c.execute("UPDATE workflow_tasks SET status='completed',completed_by=?,completed_at=? WHERE case_id=? AND status='open' AND task_type IN ('approval','final_approval')", (actor.get('id'), now, case_id))
+            _task(c, case_id, 'legal_review', '主管/最终审批退回审核专员修改', note or '请核对审批意见并修订合同审查结论。', row['assigned_to'], actor, row['due_at'])
+        elif action == 'return_to_business':
+            c.execute("UPDATE workflow_tasks SET status='completed',completed_by=?,completed_at=? WHERE case_id=? AND status='open' AND task_type IN ('approval','final_approval')", (actor.get('id'), now, case_id))
+            _task(c, case_id, 'material', '主管/最终审批退回业务补件', note or '请按审批意见补充材料或上传修订合同。', row['created_by'], actor, row['due_at'])
         elif action in {'archive', 'cancel'}:
             c.execute("UPDATE workflow_tasks SET status='completed',completed_by=?,completed_at=? WHERE case_id=? AND status='open'", (actor.get('id'), now, case_id))
         _case_event(c, case_id, f'case.{action}', note or f'执行案件动作：{action}', actor, {'from': current, 'to': target})
@@ -939,7 +1300,44 @@ def my_work_items(actor: dict, limit: int=100) -> list[dict]:
                              FROM workflow_tasks t JOIN contract_cases c ON c.case_id=t.case_id
                              WHERE t.status='open' AND {condition}
                              ORDER BY CASE c.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, t.due_at, t.created_at DESC LIMIT ?''', (*params, min(max(limit, 1), 500))).fetchall()
-        return [dict(row) for row in rows]
+        contract_items = [{**dict(row), 'source_type': 'contract', 'target_id': row['case_id']} for row in rows]
+
+        role = actor.get('role')
+        if role == 'business':
+            credit_where = "created_by=? AND status NOT IN ('approved','rejected','superseded')"
+            credit_args: list[Any] = [actor.get('id')]
+        elif role == 'reviewer':
+            credit_where = "status IN ('draft','returned_to_reviewer')"
+            credit_args = []
+        elif role == 'director':
+            credit_where = "status='pending_director'"
+            credit_args = []
+        else:
+            credit_where = "status='pending_final'"
+            credit_args = []
+        credit_rows = c.execute(f'''SELECT case_id,customer_name,status,request_note,return_note,return_target,
+                                           created_at,updated_at,submitted_at,business_type
+                                    FROM credit_cases WHERE {credit_where}
+                                    ORDER BY updated_at DESC LIMIT ?''', (*credit_args, min(max(limit, 1), 500))).fetchall()
+        credit_labels = {
+            'draft': ('credit_assessment', '待信用审核专员评估'),
+            'returned_to_reviewer': ('credit_returned', '信审已退回审核专员修改'),
+            'returned_to_business': ('credit_material', '信审待补充材料'),
+            'pending_director': ('credit_director_review', '待财务审批主管复核'),
+            'pending_final': ('credit_final_approval', '待集团财务总监最终审批'),
+        }
+        credit_items = []
+        for row in credit_rows:
+            item = dict(row); task_type, title = credit_labels.get(item['status'], ('credit', '客户信审待处理'))
+            detail = item.get('return_note') or item.get('request_note') or '请进入客户信审查看详情。'
+            credit_items.append({
+                'task_id': f"credit:{item['case_id']}", 'case_id': item['case_id'], 'target_id': item['case_id'],
+                'source_type': 'credit', 'task_type': task_type, 'title': title, 'detail': detail,
+                'status': 'open', 'due_at': None, 'created_at': item['updated_at'] or item['created_at'],
+                'customer_name': item['customer_name'], 'current_stage': item['status'], 'priority': 'high' if item['status'] in {'pending_final','returned_to_business'} else 'normal',
+                'filename': '', 'business_type': item.get('business_type') or '一般',
+            })
+    return (credit_items + contract_items)[:min(max(limit, 1), 500)]
 
 # ---- review persistence, protected mapping, actions ----
 def create_pending(job_id, filename, path, actor=None, business_type='', assignee_id='', priority='normal', due_at=None, request_note='', parent_job_id='', rule_version='contract-v1', credit_case=None, case_id='', document_role='main'):

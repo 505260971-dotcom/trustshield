@@ -20,7 +20,7 @@ DATA = os.path.join(os.path.dirname(__file__), '..', '..', 'docs', '00-命题与
 
 
 def source_path():
-    candidates = sorted(Path(DATA).glob('*.docx'))
+    candidates = sorted(path for path in Path(DATA).glob('*.docx') if not path.name.startswith('~$'))
     if not candidates:
         raise SystemExit(f'未找到 DOCX 验收样例: {DATA}')
     return str(candidates[0])
@@ -43,10 +43,16 @@ def main():
         reviewer = store.get_user_by_username('workflow-reviewer') or store.create_user('workflow-reviewer', '工作流信用审核专员', 'reviewer', 'ReviewerPassword2026!')
         director = store.get_user_by_username('workflow-director') or store.create_user('workflow-director', '工作流财务审批主管', 'director', 'DirectorPassword2026!')
         credit = store.create_credit_case('合同工作流测试客户', {'max_credit_amount': 1000000, 'max_payment_days': 90, 'min_prepayment_ratio': 0, 'allowed_payment_methods': ['bank_transfer'], 'allow_vmi_jit': True}, '工作流验收信审', reviewer)
+        assessment_task = store.start_credit_assessment(credit['case_id'], reviewer)
+        assessment = store.finish_credit_assessment(assessment_task['assessment_id'], {
+            'runtime_mode': 'production', 'audit_runtime': {'status': 'ready_for_policy'},
+            'assessment': {'model_status': 'ready_for_reviewer', 'risk_flags': [], 'business_type': '一般', 'recommendation': credit['conditions']},
+        }, [])
+        credit = store.record_credit_reviewer_decision(credit['case_id'], assessment, credit['conditions'], '', 'agent_recommended', reviewer)
         store.submit_credit_case(credit['case_id'], reviewer)
         credit = store.decide_credit_case(credit['case_id'], 'approved', '工作流主管复核', director)
         credit = store.decide_credit_case(credit['case_id'], 'approved', '工作流最终批核', actor)
-        store.create_pending(job_id, 'workflow-fixture.docx', upload_copy, actor, '模塑一体', credit_case=credit)
+        case_id = store.create_pending(job_id, 'workflow-fixture.docx', upload_copy, actor, '模塑一体', credit_case=credit)
         report = {
             'filename': 'workflow-fixture.docx',
             'summary': {'overall_level': '阻断·须财务审批主管或集团财务总监审批', 'n_clauses': 1, 'n_risks': 2, 'high': 2, 'mid': 0, 'low': 0},
@@ -60,6 +66,18 @@ def main():
             'steps': [], 'masked_entities': 0,
         }
         store.save_review(job_id, report, actor=actor)
+        # Case-level approval must remain a reversible four-role flow, not a
+        # one-way "approve or reject" button.  The per-finding approvals below
+        # are deliberately kept as the separate hard gate for signing.
+        store.transition_case(case_id, 'claim', reviewer, '领取合同初审')
+        store.transition_case(case_id, 'submit_approval', reviewer, '请主管复核合同例外')
+        returned_case = store.transition_case(case_id, 'return_to_reviewer', director, '请核对付款条件和例外依据')
+        assert returned_case['current_stage'] == 'legal_review'
+        store.transition_case(case_id, 'submit_approval', reviewer, '已按主管意见修订并重新报送')
+        final_case = store.transition_case(case_id, 'escalate_final', director, '上报集团财务总监最终审批')
+        assert final_case['current_stage'] == 'final_approval'
+        returned_business = store.transition_case(case_id, 'return_to_business', actor, '请业务补充对方盖章确认函')
+        assert returned_business['current_stage'] == 'awaiting_business'
         approvals = store.list_approvals(job_id)
         materials = store.list_material_requests(job_id)
         assert {x['required_role'] for x in approvals} == {'admin', 'director'}
