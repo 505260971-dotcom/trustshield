@@ -21,6 +21,8 @@ def main():
     r16 = assess_clause('供应商应按照 VMI 模式维持安全库存。', '模塑一体')
     assert r16['R16']['facts']['approval_role'] == '财务审批主管'
     assert 'R16' not in assess_clause('供应商应按照 VMI 模式维持安全库存。', '一般')
+    assert 'R16' not in assess_clause('双方采用普通送货方式，不采用 VMI、JIT、供应商管理库存或准时制交付模式。', '模塑一体')
+    assert 'R16' not in applicable_rule_ids('双方采用普通送货方式，不采用 VMI、JIT、供应商管理库存或准时制交付模式。', '模塑一体')
     assert assess_clause('本合同有效期为 8 年。', '一般')['R11']['facts']['validity_years'] == 8
     assert 'R11' in assess_clause('本协议有效期至双方权利和义务履行完毕之日止。', '一般')
     assert 'R12' in assess_clause('供应商应承担采购方遭受的所有直接损失及间接损失。', '一般')

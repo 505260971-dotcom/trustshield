@@ -42,6 +42,10 @@ CORS_ORIGINS = [x.strip() for x in os.getenv('CORS_ORIGINS', 'http://localhost:5
 # credential.  They remain immutable environment-level controls.
 CREDIT_AUDIT_AGENT_ENABLED = os.getenv('CREDIT_AUDIT_AGENT_ENABLED', 'true').lower() == 'true'
 CREDIT_AUDIT_AGENT_MAX_TASKS = min(12, max(3, int(os.getenv('CREDIT_AUDIT_AGENT_MAX_TASKS', '8'))))
+# The production ReAct executor has a separate bounded tool budget.  Keep it
+# above the minimum needed to inspect a document, validate context and submit
+# claims, while retaining an upper bound against runaway remote calls.
+CREDIT_REACT_AGENT_MAX_STEPS = min(24, max(8, int(os.getenv('CREDIT_REACT_AGENT_MAX_STEPS', '16'))))
 CREDIT_AUDIT_MAX_FINANCIAL_AGE_YEARS = min(5, max(0, int(os.getenv('CREDIT_AUDIT_MAX_FINANCIAL_AGE_YEARS', '2'))))
 CREDIT_AUDIT_MAX_EXPOSURE_AGE_DAYS = min(90, max(1, int(os.getenv('CREDIT_AUDIT_MAX_EXPOSURE_AGE_DAYS', '7'))))
 REMOTE_CONTEXT_TOKENS = 128000

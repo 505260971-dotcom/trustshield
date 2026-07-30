@@ -37,6 +37,9 @@ def _claims():
 
 
 def main():
+    assert react._claim_kind({'entity_name': '测试客户'}) == 'identity'
+    assert react._claim_kind({'period': '2025年度', 'scope': '合并口径', 'currency': '人民币', 'source_unit': '元'}) == 'financial_context'
+    assert react._claim_kind({'metric': '营业收入', 'value': 1}) == 'financial_metric'
     document = {'document_id': 'DOC', 'document_type': 'financial_report', 'original_name': 'unknown-format.pdf'}
     old = react.configured_financial_llm, react.get_financial_llm, react.invoke_remote, react.rerank_required
     try:
@@ -46,19 +49,28 @@ def main():
 
         def invoke(_llm, _messages, **_kwargs):
             turns.append(1)
-            if len(turns) == 1:
+            if len(turns) in {1, 2}:
                 return _Response(json.dumps({'reason_summary': '先检索财务报表原始证据', 'action': 'tool', 'tool': 'search_evidence',
                                                'arguments': {'query': '测试客户 2025年度 合并财务报表核心指标', 'document_ids': ['DOC']}, 'claims': [], 'material_requests': []}, ensure_ascii=False))
             return _Response(json.dumps({'reason_summary': '证据完整，提交可验证Claim', 'action': 'submit_claims', 'tool': '',
                                            'arguments': {}, 'claims': _claims(), 'material_requests': []}, ensure_ascii=False))
 
         react.invoke_remote = invoke
-        react.rerank_required = lambda _query, pool: {'mode': 'qwen3-rerank', 'request_id': 'mock-rerank', 'results': pool}
+        rerank_calls = []
+        def rerank(_query, pool):
+            rerank_calls.append(_query)
+            return {'mode': 'qwen3-rerank', 'request_id': 'mock-rerank', 'results': pool}
+        react.rerank_required = rerank
         result = react.run_react_credit_audit({'customer_name': '测试客户', 'conditions': {}}, [document], {'DOC': _records()},
                                               {'current_receivables': 0, 'booked_order_amount': 0, 'overdue_days': 0, 'currency': 'CNY', 'as_of': time.time()})
         assert result['status'] == 'ready_for_policy', result
         assert result['facts']['revenue'] == 120_000_000
-        assert len(result['trace']) == 2
+        assert len(result['trace']) == 3
+        assert result['trace'][0]['tool'] == 'search_evidence'
+        assert result['trace'][0]['result_summary'].startswith('search_evidence：返回')
+        assert result['trace'][1]['observation']['error'] == 'duplicate_tool_call'
+        assert len(rerank_calls) == 1, '重复工具调用不得再次触发远程重排'
+        assert result['trace'][-1]['progress_after']['verified_metrics'] == sorted(react.CORE_METRICS)
         assert len(result['claims']) == 9
     finally:
         react.configured_financial_llm, react.get_financial_llm, react.invoke_remote, react.rerank_required = old

@@ -39,6 +39,7 @@ def main():
     if not actor:
         raise SystemExit('缺少演示管理员，无法运行工作流回归')
     job_id = 'TEST-' + uuid.uuid4().hex[:12]
+    revision_job = ''
     try:
         reviewer = store.get_user_by_username('workflow-reviewer') or store.create_user('workflow-reviewer', '工作流信用审核专员', 'reviewer', 'ReviewerPassword2026!')
         director = store.get_user_by_username('workflow-director') or store.create_user('workflow-director', '工作流财务审批主管', 'director', 'DirectorPassword2026!')
@@ -50,9 +51,16 @@ def main():
         }, [])
         credit = store.record_credit_reviewer_decision(credit['case_id'], assessment, credit['conditions'], '', 'agent_recommended', reviewer)
         store.submit_credit_case(credit['case_id'], reviewer)
+        # Routing assigns the next role automatically.  Resolve the selected
+        # account instead of assuming the fixture account is the first active
+        # director/admin in a reused local database.
+        assigned = {item['id']: item for item in store.list_users()}
+        director = assigned[store.get_credit_case(credit['case_id'])['assigned_to']]
         credit = store.decide_credit_case(credit['case_id'], 'approved', '工作流主管复核', director)
-        credit = store.decide_credit_case(credit['case_id'], 'approved', '工作流最终批核', actor)
-        case_id = store.create_pending(job_id, 'workflow-fixture.docx', upload_copy, actor, '模塑一体', credit_case=credit)
+        final_actor = assigned[store.get_credit_case(credit['case_id'])['assigned_to']]
+        credit = store.decide_credit_case(credit['case_id'], 'approved', '工作流最终批核', final_actor)
+        contract = store.create_case_center('合同工作流测试客户', '模塑一体', '工作流合同测试', actor, credit['case_id'])
+        case_id = store.create_pending(job_id, 'workflow-fixture.docx', upload_copy, actor, '模塑一体', credit_case=credit, case_id=contract['case_id'])
         report = {
             'filename': 'workflow-fixture.docx',
             'summary': {'overall_level': '阻断·须财务审批主管或集团财务总监审批', 'n_clauses': 1, 'n_risks': 2, 'high': 2, 'mid': 0, 'low': 0},
@@ -78,6 +86,26 @@ def main():
         assert final_case['current_stage'] == 'final_approval'
         returned_business = store.transition_case(case_id, 'return_to_business', actor, '请业务补充对方盖章确认函')
         assert returned_business['current_stage'] == 'awaiting_business'
+
+        # A new revision becomes the current business version.  Historical V1
+        # approvals/material requests remain auditable but must not block V2
+        # from reaching the signing gate.
+        revision_job = 'TEST-' + uuid.uuid4().hex[:12]
+        revision_case = store.create_pending(revision_job, 'workflow-revision.docx', upload_copy, actor, '模塑一体', parent_job_id=job_id, credit_case=credit, case_id=case_id, document_role='revision')
+        assert revision_case == case_id
+        store.save_review(revision_job, {
+            'filename': 'workflow-revision.docx',
+            'summary': {'overall_level': '低风险', 'n_clauses': 1, 'n_risks': 0, 'high': 0, 'mid': 0, 'low': 0},
+            'contract_fields': {'business_type': '模塑一体'}, 'clauses': [], 'risks': [], 'review_hints': [], 'steps': [], 'masked_entities': 0,
+        }, actor=actor)
+        revision_case_detail = store.get_case_center(case_id, reviewer)
+        assert revision_case_detail['documents'][0]['is_current_version'] is True
+        assert revision_case_detail['documents'][0]['job_id'] == revision_job
+        active_task = next(task for task in revision_case_detail['tasks'] if task['status'] == 'open')
+        reviewer = assigned[active_task['assignee_id']]
+        ready_case = store.transition_case(case_id, 'ready_for_signing', reviewer, 'V2 已完成审查，历史版本仅留档')
+        assert ready_case['current_stage'] == 'ready_to_sign'
+
         approvals = store.list_approvals(job_id)
         materials = store.list_material_requests(job_id)
         assert {x['required_role'] for x in approvals} == {'admin', 'director'}
@@ -100,6 +128,8 @@ def main():
         os.remove(output)
         print('OK: approvals, materials, knowledge, and source-contract export')
     finally:
+        if revision_job:
+            store.delete_review(revision_job)
         store.delete_review(job_id)
         store.purge_knowledge_by_source('TEST_WORKFLOW_FIXTURE')
         if os.path.exists(upload_copy):

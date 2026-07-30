@@ -11,10 +11,11 @@
 
 ## 快速阅读顺序
 
-1. `00-命题与数据/` 命题说明（docx）  
-2. `01-产品与架构/architecture.md` 系统链路  
-3. `01-产品与架构/enterprise-customization.md` 定制项完成度  
-4. `03-演示与交付/demo-script.md` 5 分钟演示  
-5. `02-接口与验收/` 联调与回归  
+1. `00-命题与数据/` 命题说明（docx）
+2. `01-产品与架构/architecture.md` 系统链路
+3. `01-产品与架构/enterprise-customization.md` 定制项完成度
+4. `03-演示与交付/模拟测试材料/10-从零实跑操作说明.md` 首次从信审到合同审核的全流程实跑
+5. `03-演示与交付/demo-script.md` 5 分钟演示
+6. `02-接口与验收/` 联调与回归
 
 可运行工程在仓库**根目录**（`backend/`、`frontend/`、`dev.ps1`）。

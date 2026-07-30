@@ -22,6 +22,23 @@ _ACCEPTANCE = re.compile(r'(?:银行承兑|商业承兑|bank\s+acceptance|accept
 # to Python's regex engine, so \bVMI\b would miss forms such as “VMI模式”.
 _VMI_JIT = re.compile(r'(?:VMI|JIT|vendor\s*managed\s*inventory|just[ -]?in[ -]?time)|供应商管理库存|准时制', re.I)
 _AMOUNT = re.compile(r'(\d[\d,]*\.?\d*)\s*(元|人民币|港币|美元|RMB|CNY|HKD|USD)', re.I)
+_VMI_JIT_NEGATION = re.compile(r'(?:不(?:采用|使用|含有?|包含|涉及)|未(?:采用|使用|包含)|禁止(?:采用|使用|包含)?|不得(?:采用|使用|包含)?|无)[^。；;]{0,24}$', re.I)
+
+
+def positive_vmi_jit_match(text: str):
+    """Return a VMI/JIT mention only when the surrounding clause does not negate it.
+
+    Contract revisions frequently contain wording such as "不采用 VMI、JIT".  A
+    lexical hit is useful for candidate recall, but it must not become a credit
+    blocker or deterministic contract risk when the delivery mode is explicitly
+    prohibited in the same sentence.
+    """
+    value = text or ''
+    for match in _VMI_JIT.finditer(value):
+        prefix = value[max(0, match.start() - 32):match.start()]
+        if not _VMI_JIT_NEGATION.search(prefix):
+            return match
+    return None
 
 
 def normalize_conditions(value: dict[str, Any]) -> dict[str, Any]:
@@ -112,8 +129,9 @@ def assess_credit_compliance(clauses: list[dict], conditions: dict[str, Any], ex
     if _ACCEPTANCE.search(text) and 'acceptance_bill' not in methods:
         findings.append(_risk('CREDIT_PAYMENT_METHOD', '该客户信审未授权承兑汇票付款', _ACCEPTANCE.search(text).group(0),
                               '合同付款方式包含承兑汇票，但绑定信审版本未授权该方式', {'payment_method': 'acceptance_bill', 'allowed_payment_methods': sorted(methods)}))
-    if _VMI_JIT.search(text) and not conditions.get('allow_vmi_jit', False):
-        findings.append(_risk('CREDIT_DELIVERY_MODE', '该客户信审未授权 VMI/JIT 交付模式', _VMI_JIT.search(text).group(0),
+    vmi_jit = positive_vmi_jit_match(text)
+    if vmi_jit and not conditions.get('allow_vmi_jit', False):
+        findings.append(_risk('CREDIT_DELIVERY_MODE', '该客户信审未授权 VMI/JIT 交付模式', vmi_jit.group(0),
                               '合同包含 VMI/JIT，但绑定信审版本未授权该交付模式', {'delivery_mode': 'vmi_jit'}))
 
     cap = conditions.get('max_credit_amount', 0)

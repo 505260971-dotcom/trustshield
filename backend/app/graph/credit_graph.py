@@ -772,11 +772,13 @@ def node_react_audit(state: CreditState) -> CreditState:
     claim_evidence = [{'category': 'react_verified_claim', 'field': str(item.get('type') or ''), 'value': item,
                        'document_id': item.get('document_id'), 'source_ref': item.get('source_ref', ''), 'confidence': 1.0}
                       for item in audit.get('claims') or []]
-    trace_evidence = [{'category': 'react_trace', 'field': f"step_{item.get('step', 0)}", 'value': item,
-                       'document_id': '', 'source_ref': '', 'confidence': None} for item in audit.get('trace') or []]
     state['react_audit'] = audit
     state['facts'] = audit.get('facts') or {}
-    state['evidence'] = [*(state.get('evidence') or []), *claim_evidence, *trace_evidence]
+    # The full ReAct trace is already embedded in ``audit_runtime`` and has a
+    # dedicated frontend step view.  Do not duplicate opaque trace objects in
+    # the source-evidence list, where browsers previously rendered them as
+    # "[object Object]" and obscured the actual verified Claims.
+    state['evidence'] = [*(state.get('evidence') or []), *claim_evidence]
     state['missing_materials'] = [{'type': 'react_agent', 'title': '补充或人工核验信审证据', 'detail': str(item)[:500]}
                                   for item in audit.get('material_requests') or []]
     state['steps'] = [f"ReAct 信审Agent: 状态 {audit.get('status')}；已验证 Claim {len(audit.get('claims') or [])} 条；"

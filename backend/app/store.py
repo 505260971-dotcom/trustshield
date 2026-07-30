@@ -231,6 +231,9 @@ def init_db():
         _add_column(c, 'credit_cases', 'returned_at REAL')
         _add_column(c, 'credit_cases', "route_version TEXT NOT NULL DEFAULT ''")
         _add_column(c, 'credit_cases', "route_snapshot_json TEXT NOT NULL DEFAULT '{}'")
+        # 信审和合同都需要有明确的“下一位处理人”。历史数据为空时仍可
+        # 正常展示；新流转的数据会在进入相应岗位时自动写入负责人。
+        _add_column(c, 'credit_cases', 'assigned_to TEXT')
         for definition in ('assigned_to TEXT', "priority TEXT NOT NULL DEFAULT 'normal'", 'due_at REAL', "request_note TEXT NOT NULL DEFAULT ''"):
             _add_column(c, 'contract_cases', definition)
         for definition in ("customer_name TEXT NOT NULL DEFAULT ''", "current_stage TEXT NOT NULL DEFAULT 'draft'", "credit_case_id TEXT NOT NULL DEFAULT ''", 'closed_at REAL'):
@@ -248,6 +251,24 @@ def init_db():
             c.execute('UPDATE audit_events SET actor_role=? WHERE actor_role=?', (new_role, old_role))
             c.execute('UPDATE finding_approvals SET required_role=? WHERE required_role=?', (new_role, old_role))
             c.execute('UPDATE rule_definitions SET approval_role=? WHERE approval_role=?', (new_role, old_role))
+        # Give historic in-flight work the same explicit ownership as newly
+        # created work.  This is deliberately idempotent and only fills blank
+        # assignments, never overwriting a person chosen before the upgrade.
+        for status, role in {'draft': 'reviewer', 'returned_to_reviewer': 'reviewer',
+                             'pending_director': 'director', 'pending_final': 'admin'}.items():
+            c.execute('''UPDATE credit_cases SET assigned_to=(SELECT id FROM users
+                       WHERE active=1 AND role=? ORDER BY created_at,id LIMIT 1)
+                       WHERE status=? AND (assigned_to IS NULL OR assigned_to='')''', (role, status))
+        c.execute('''UPDATE credit_cases SET assigned_to=created_by
+                     WHERE status='returned_to_business' AND (assigned_to IS NULL OR assigned_to='')''')
+        for task_type, role in {'legal_review': 'reviewer', 'approval': 'director', 'final_approval': 'admin'}.items():
+            c.execute('''UPDATE workflow_tasks SET assignee_id=(SELECT id FROM users
+                       WHERE active=1 AND role=? ORDER BY created_at,id LIMIT 1)
+                       WHERE status='open' AND task_type=? AND (assignee_id IS NULL OR assignee_id='')''', (role, task_type))
+        c.execute('''UPDATE workflow_tasks SET assignee_id=(SELECT created_by FROM contract_cases c
+                   WHERE c.case_id=workflow_tasks.case_id)
+                   WHERE status='open' AND task_type IN ('credit_required','document_required','revision_required','material')
+                   AND (assignee_id IS NULL OR assignee_id='')''')
         # v5 introduces the documented two-step credit decision: finance
         # manager review first, Group CFO final approval second.  A legacy
         # pending item has not recorded either decision, therefore it restarts
@@ -257,8 +278,9 @@ def init_db():
         # administrator edits to the rule catalogue.
         c.execute("UPDATE rule_definitions SET baseline=REPLACE(baseline,'CEO','集团财务总监'), rule_check=REPLACE(rule_check,'CEO','最终审批人'), template=REPLACE(template,'CEO','集团财务总监') WHERE approval_role='admin' AND (baseline LIKE '%CEO%' OR rule_check LIKE '%CEO%' OR template LIKE '%CEO%')")
         c.execute("UPDATE rule_definitions SET baseline=REPLACE(baseline,'总监','财务审批主管'), rule_check=REPLACE(rule_check,'总监','主管'), template=REPLACE(template,'总监','财务审批主管') WHERE approval_role='director' AND (baseline LIKE '%总监%' OR rule_check LIKE '%总监%' OR template LIKE '%总监%')")
-        # Existing demo data remains accessible after the case-centre upgrade:
-        # every historical primary review becomes the first document of its case.
+        # One-time data normalisation: every historical review becomes a
+        # document version under its owning case.  Runtime code below only
+        # follows this document-version relation.
         legacy = c.execute("SELECT case_id,job_id,created_by,created_at FROM contract_cases WHERE job_id IS NOT NULL AND job_id<>''").fetchall()
         for row in legacy:
             exists = c.execute('SELECT 1 FROM case_documents WHERE job_id=?', (row['job_id'],)).fetchone()
@@ -269,6 +291,7 @@ def init_db():
                            (review['filename'] if review else '历史合同'), 'main', 'V1', None,
                            row['created_by'], row['created_at']))
             c.execute("UPDATE contract_cases SET current_stage=CASE status WHEN 'running' THEN 'ai_review' WHEN 'pending_review' THEN 'legal_review' WHEN 'in_review' THEN 'legal_review' WHEN 'returned' THEN 'awaiting_business' WHEN 'approved' THEN 'ready_to_sign' WHEN 'closed' THEN 'archived' ELSE current_stage END WHERE case_id=?", (row['case_id'],))
+        c.execute("UPDATE contract_cases SET job_id=NULL WHERE job_id IS NOT NULL AND job_id<>''")
     _seed_initial_admin()
     _seed_rule_catalog()
     _seed_credit_model()
@@ -520,7 +543,9 @@ def list_credit_cases(customer: str='', active_only: bool=False, created_by: str
         # valid_to lives inside the immutable JSON snapshot; filter exact validity below.
     if where:
         sql += ' WHERE ' + ' AND '.join(where)
-    sql += ' ORDER BY customer_name, version DESC'
+    # 客户信审工作台默认展示最近发生变化的案件。按客户名称分组会让
+    # 新提交的申请落在列表中间，和“从新到旧处理”的操作习惯相反。
+    sql += ' ORDER BY updated_at DESC, created_at DESC, version DESC'
     with _lock, _conn() as c:
         items = [_credit_case(row) for row in c.execute(sql, args).fetchall()]
     if active_only:
@@ -546,10 +571,13 @@ def create_credit_case(customer_name: str, conditions: dict, request_note: str, 
     with _lock, _conn() as c:
         row = c.execute('SELECT COALESCE(MAX(version), 0) AS v FROM credit_cases WHERE customer_key=?', (key,)).fetchone()
         version = int(row['v']) + 1
-        c.execute('''INSERT INTO credit_cases(case_id,customer_key,customer_name,version,status,conditions_json,request_note,decision_note,created_by,created_at,updated_at,business_type)
-                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
+        # A credit reviewer who creates a version is the natural first owner.
+        # Business/CRM requests still use the normal reviewer routing rule.
+        reviewer_id = actor.get('id') if actor.get('role') == 'reviewer' else _role_assignee(c, 'reviewer')
+        c.execute('''INSERT INTO credit_cases(case_id,customer_key,customer_name,version,status,conditions_json,request_note,decision_note,created_by,created_at,updated_at,business_type,assigned_to)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                    (case_id, key, customer_name, version, 'draft', json.dumps(normal, ensure_ascii=False),
-                    (request_note or '').strip()[:2000], '', actor.get('id'), now, now, business_type))
+                    (request_note or '').strip()[:2000], '', actor.get('id'), now, now, business_type, reviewer_id))
     return get_credit_case(case_id)
 
 def update_credit_case(case_id: str, conditions: dict, request_note: str, actor: dict, reviewer_note: str='') -> dict:
@@ -671,11 +699,13 @@ def submit_credit_case(case_id: str, actor: dict) -> dict:
     # versioned policy from within that critical section would deadlock.
     route_catalog = get_credit_route_version()
     with _lock, _conn() as c:
-        row = c.execute('SELECT status,review_mode,reviewer_note,assessment_id,assessment_snapshot_json,conditions_json FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
+        row = c.execute('SELECT status,assigned_to,review_mode,reviewer_note,assessment_id,assessment_snapshot_json,conditions_json FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
         if not row:
             raise ValueError('信审案件不存在')
         if row['status'] not in {'draft', 'returned_to_reviewer'}:
             raise ValueError('仅草稿或退回审核专员的信审案件可提交')
+        if row['assigned_to'] and row['assigned_to'] != actor.get('id') and actor.get('role') != 'admin':
+            raise ValueError('该信审已自动分派给其他信用审核专员，请由负责人处理')
         if row['review_mode'] not in {'agent_recommended', 'reviewer_adjusted', 'manual_override'} or not row['assessment_id']:
             raise ValueError('请先确认生产 Agent/模型建议；若建议不适用或 Agent 异常，请填写人工修订依据后再报送')
         if row['review_mode'] in {'reviewer_adjusted', 'manual_override'} and not (row['reviewer_note'] or '').strip():
@@ -689,8 +719,8 @@ def submit_credit_case(case_id: str, actor: dict) -> dict:
         now = time.time()
         conditions = json.loads(row['conditions_json'] or '{}')
         route = _evaluate_credit_route(route_catalog, conditions, row['review_mode'])
-        c.execute("UPDATE credit_cases SET status='pending_director',submitted_at=?,route_version=?,route_snapshot_json=?,return_note='',return_target='',returned_by=NULL,returned_at=NULL,updated_at=? WHERE case_id=?",
-                  (now, route['version'], json.dumps(route, ensure_ascii=False), now, case_id))
+        c.execute("UPDATE credit_cases SET status='pending_director',assigned_to=?,submitted_at=?,route_version=?,route_snapshot_json=?,return_note='',return_target='',returned_by=NULL,returned_at=NULL,updated_at=? WHERE case_id=?",
+                  (_role_assignee(c, 'director'), now, route['version'], json.dumps(route, ensure_ascii=False), now, case_id))
     return get_credit_case(case_id)
 
 def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> dict:
@@ -703,25 +733,28 @@ def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> d
         if not case:
             raise ValueError('信审案件不存在')
         role = actor.get('role')
+        if case['assigned_to'] and case['assigned_to'] != actor.get('id') and role != 'admin':
+            raise ValueError('该信审已自动分派给其他负责人，请由负责人处理')
         if case['status'] == 'pending_director':
             if role != 'director':
                 raise ValueError('该信审申请须由财务审批主管先复核')
             now = time.time()
             if decision == 'rejected':
-                c.execute('UPDATE credit_cases SET status=?,director_note=?,director_by=?,director_at=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
+                c.execute('UPDATE credit_cases SET status=?,assigned_to=NULL,director_note=?,director_by=?,director_at=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
                           ('rejected', note.strip()[:2000], actor.get('id'), now, note.strip()[:2000], actor.get('id'), now, now, case_id))
             elif decision.startswith('returned_'):
-                c.execute('''UPDATE credit_cases SET status=?,director_note=?,director_by=?,director_at=?,return_note=?,return_target=?,returned_by=?,returned_at=?,updated_at=? WHERE case_id=?''',
-                          (decision, note.strip()[:2000], actor.get('id'), now, note.strip()[:2000],
+                owner = _role_assignee(c, 'reviewer') if decision == 'returned_to_reviewer' else case['created_by']
+                c.execute('''UPDATE credit_cases SET status=?,assigned_to=?,director_note=?,director_by=?,director_at=?,return_note=?,return_target=?,returned_by=?,returned_at=?,updated_at=? WHERE case_id=?''',
+                          (decision, owner, note.strip()[:2000], actor.get('id'), now, note.strip()[:2000],
                            'reviewer' if decision == 'returned_to_reviewer' else 'business', actor.get('id'), now, now, case_id))
             else:
                 route = json.loads(case['route_snapshot_json'] or '{}')
                 if route.get('requires_final'):
-                    c.execute("UPDATE credit_cases SET status='pending_final',director_note=?,director_by=?,director_at=?,updated_at=? WHERE case_id=?",
-                              (note.strip()[:2000], actor.get('id'), now, now, case_id))
+                    c.execute("UPDATE credit_cases SET status='pending_final',assigned_to=?,director_note=?,director_by=?,director_at=?,updated_at=? WHERE case_id=?",
+                              (_role_assignee(c, 'admin'), note.strip()[:2000], actor.get('id'), now, now, case_id))
                 else:
                     c.execute("UPDATE credit_cases SET status='superseded',updated_at=? WHERE customer_key=? AND status='approved'", (now, case['customer_key']))
-                    c.execute('UPDATE credit_cases SET status=?,director_note=?,director_by=?,director_at=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
+                    c.execute('UPDATE credit_cases SET status=?,assigned_to=NULL,director_note=?,director_by=?,director_at=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
                               ('approved', note.strip()[:2000], actor.get('id'), now, note.strip()[:2000], actor.get('id'), now, now, case_id))
         else:
             if case['status'] != 'pending_final':
@@ -734,11 +767,12 @@ def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> d
                 # Contract reviews must be rerun against this new snapshot.
                 c.execute("UPDATE credit_cases SET status='superseded',updated_at=? WHERE customer_key=? AND status='approved'", (now, case['customer_key']))
             if decision.startswith('returned_'):
-                c.execute('''UPDATE credit_cases SET status=?,return_note=?,return_target=?,returned_by=?,returned_at=?,updated_at=? WHERE case_id=?''',
-                          (decision, note.strip()[:2000], 'reviewer' if decision == 'returned_to_reviewer' else 'business',
+                owner = _role_assignee(c, 'reviewer') if decision == 'returned_to_reviewer' else case['created_by']
+                c.execute('''UPDATE credit_cases SET status=?,assigned_to=?,return_note=?,return_target=?,returned_by=?,returned_at=?,updated_at=? WHERE case_id=?''',
+                          (decision, owner, note.strip()[:2000], 'reviewer' if decision == 'returned_to_reviewer' else 'business',
                            actor.get('id'), now, now, case_id))
             else:
-                c.execute('UPDATE credit_cases SET status=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
+                c.execute('UPDATE credit_cases SET status=?,assigned_to=NULL,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
                           (decision, note.strip()[:2000], actor.get('id'), now, now, case_id))
     return get_credit_case(case_id)
 
@@ -755,7 +789,7 @@ def resubmit_credit_case(case_id: str, actor: dict) -> dict:
             raise ValueError('仅退回补材料的信审案件可重新提交')
         if actor.get('role') == 'business' and row['created_by'] != actor.get('id'):
             raise ValueError('仅申请人可重新提交该信审案件')
-        c.execute("UPDATE credit_cases SET status='draft',updated_at=? WHERE case_id=?", (time.time(), case_id))
+        c.execute("UPDATE credit_cases SET status='draft',assigned_to=?,updated_at=? WHERE case_id=?", (_role_assignee(c, 'reviewer'), time.time(), case_id))
     return get_credit_case(case_id)
 
 def require_active_credit_case(case_id: str) -> dict:
@@ -1070,10 +1104,44 @@ CASE_STAGES = {
 def _case_event(c, case_id: str, event_type: str, message: str, actor: dict | None=None, payload: dict | None=None):
     c.execute('INSERT INTO case_events VALUES (?,?,?,?,?,?,?)',
               ('EVT-' + uuid.uuid4().hex[:16].upper(), case_id, event_type, message,
-               (actor or {}).get('id'), json.dumps(payload or {}, ensure_ascii=False), time.time()))
+              (actor or {}).get('id'), json.dumps(payload or {}, ensure_ascii=False), time.time()))
+
+
+# Every open workflow node has one responsible role.  Individual assignees are
+# selected from active members of that role by their current open-task load so
+# people never need to “claim” a task just to make ownership visible.
+TASK_RESPONSIBLE_ROLE = {
+    'credit_required': 'business', 'document_required': 'business', 'revision_required': 'business',
+    'material': 'business', 'legal_review': 'reviewer', 'approval': 'director',
+    'final_approval': 'admin',
+}
+
+ROLE_DISPLAY = {'business': '业务申请人', 'reviewer': '信用审核专员', 'director': '财务审批主管', 'admin': '集团财务总监'}
+
+
+def _responsibility(task_type: str='', stage: str='') -> str:
+    if task_type in TASK_RESPONSIBLE_ROLE:
+        return TASK_RESPONSIBLE_ROLE[task_type]
+    return {
+        'awaiting_credit': 'business', 'draft': 'business', 'ai_review': 'system',
+        'legal_review': 'reviewer', 'awaiting_business': 'business', 'approval': 'director',
+        'final_approval': 'admin', 'ready_to_sign': 'business', 'archived': 'system',
+    }.get(stage, 'system')
+
+
+def _role_assignee(c, role: str) -> str | None:
+    row = c.execute('''SELECT u.id FROM users u
+                       WHERE u.active=1 AND u.role=?
+                       ORDER BY (SELECT COUNT(*) FROM workflow_tasks wt
+                                 WHERE wt.assignee_id=u.id AND wt.status='open'),
+                                u.created_at ASC, u.id ASC
+                       LIMIT 1''', (role,)).fetchone()
+    return row['id'] if row else None
+
 
 def _task(c, case_id: str, task_type: str, title: str, detail: str='', assignee_id: str | None=None,
           actor: dict | None=None, due_at: float | None=None, payload: dict | None=None):
+    assignee_id = assignee_id or _role_assignee(c, TASK_RESPONSIBLE_ROLE.get(task_type, ''))
     task_id = 'TASK-' + uuid.uuid4().hex[:16].upper()
     c.execute('INSERT INTO workflow_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
               (task_id, case_id, task_type, title, detail, 'open', assignee_id,
@@ -1092,9 +1160,9 @@ def create_case_center(customer_name: str, business_type: str, request_note: str
     case_id = 'CASE-' + uuid.uuid4().hex[:12].upper(); now = time.time()
     stage = 'awaiting_credit' if not credit_case_id else 'draft'
     with _lock, _conn() as c:
-        c.execute('''INSERT INTO contract_cases(case_id,job_id,business_type,status,created_by,created_at,updated_at,assigned_to,priority,due_at,request_note,customer_name,current_stage,credit_case_id)
-                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                  (case_id, None, business_type or '一般', stage, actor.get('id'), now, now, None,
+        c.execute('''INSERT INTO contract_cases(case_id,business_type,status,created_by,created_at,updated_at,assigned_to,priority,due_at,request_note,customer_name,current_stage,credit_case_id)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                  (case_id, business_type or '一般', stage, actor.get('id'), now, now, None,
                    priority, due_at, (request_note or '').strip()[:1000], customer_name, stage, credit_case_id))
         _case_event(c, case_id, 'case.created', '已创建合同案件，等待提交合同文件', actor, {'customer_name': customer_name})
         if stage == 'awaiting_credit':
@@ -1123,12 +1191,102 @@ def list_case_center(actor: dict, scope: str='all', limit: int=100) -> list[dict
                                     (SELECT overall_level FROM reviews r JOIN case_documents d ON d.job_id=r.id WHERE d.case_id=c.case_id ORDER BY d.created_at DESC LIMIT 1) AS overall_level,
                                     (SELECT COUNT(*) FROM case_documents d WHERE d.case_id=c.case_id) AS document_count,
                                     (SELECT COUNT(*) FROM workflow_tasks wt WHERE wt.case_id=c.case_id AND wt.status='open') AS open_tasks
+                                    ,(SELECT task_type FROM workflow_tasks wt WHERE wt.case_id=c.case_id AND wt.status='open' ORDER BY wt.created_at DESC LIMIT 1) AS current_task_type
+                                    ,(SELECT u.display_name FROM workflow_tasks wt LEFT JOIN users u ON u.id=wt.assignee_id WHERE wt.case_id=c.case_id AND wt.status='open' ORDER BY wt.created_at DESC LIMIT 1) AS current_assignee_name
                              FROM contract_cases c
                              LEFT JOIN users creator ON creator.id=c.created_by
                              LEFT JOIN users assignee ON assignee.id=c.assigned_to
                              WHERE 1=1 {where}
-                             ORDER BY CASE c.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, c.updated_at DESC LIMIT ?''', (*params, min(max(limit, 1), 500))).fetchall()
-        return [dict(row) for row in rows]
+                             -- 案件中心是全量浏览入口：默认以最近变更时间倒序，
+                             -- 确保新申请和刚上传修订件的案件始终位于列表前部。
+                             -- 优先级仍作为页面字段展示，不再隐式改变列表时间顺序。
+                             ORDER BY c.updated_at DESC, c.created_at DESC LIMIT ?''', (*params, min(max(limit, 1), 500))).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            role = _responsibility(item.get('current_task_type') or '', item.get('current_stage') or '')
+            item['responsible_role'] = role
+            item['responsible_name'] = item.get('current_assignee_name') or ROLE_DISPLAY.get(role, '系统')
+        return items
+
+
+def list_customer_workspaces(actor: dict, limit: int=200) -> list[dict]:
+    """Aggregate the two workflows under a customer, not under technical IDs.
+
+    The customer page intentionally returns concise workflow summaries instead
+    of raw documents/reports: it is the navigation surface that answers
+    “which customer, what is waiting, and who owns the next action?”.
+    """
+    init_db()
+    max_items = min(max(limit, 1), 500)
+    with _lock, _conn() as c:
+        credit_filter, credit_params = ('', []) if actor.get('role') != 'business' else ('WHERE cc.created_by=?', [actor.get('id')])
+        credit_rows = c.execute(f'''SELECT cc.case_id,cc.customer_key,cc.customer_name,cc.version,cc.status,cc.business_type,
+                                           cc.created_at,cc.updated_at,cc.assigned_to,u.display_name AS assigned_name
+                                    FROM credit_cases cc LEFT JOIN users u ON u.id=cc.assigned_to
+                                    {credit_filter}
+                                    ORDER BY cc.updated_at DESC,cc.created_at DESC''', credit_params).fetchall()
+        case_filter, case_params = ('', []) if actor.get('role') != 'business' else ('WHERE c.created_by=?', [actor.get('id')])
+        contract_rows = c.execute(f'''SELECT c.case_id,c.customer_name,c.business_type,c.current_stage,c.priority,c.created_at,c.updated_at,
+                                             c.credit_case_id,c.request_note,
+                                             (SELECT original_name FROM case_documents d WHERE d.case_id=c.case_id ORDER BY d.created_at DESC LIMIT 1) AS filename,
+                                             (SELECT COUNT(*) FROM workflow_tasks wt WHERE wt.case_id=c.case_id AND wt.status='open') AS open_tasks,
+                                             (SELECT task_type FROM workflow_tasks wt WHERE wt.case_id=c.case_id AND wt.status='open' ORDER BY wt.created_at DESC LIMIT 1) AS current_task_type,
+                                             (SELECT u.display_name FROM workflow_tasks wt LEFT JOIN users u ON u.id=wt.assignee_id WHERE wt.case_id=c.case_id AND wt.status='open' ORDER BY wt.created_at DESC LIMIT 1) AS assigned_name
+                                      FROM contract_cases c {case_filter}
+                                      ORDER BY c.updated_at DESC,c.created_at DESC''', case_params).fetchall()
+
+    def key_for(name: str) -> str:
+        return ''.join((name or '').strip().lower().split())[:200]
+
+    credit_role = {
+        'draft': 'reviewer', 'returned_to_reviewer': 'reviewer', 'returned_to_business': 'business',
+        'pending_director': 'director', 'pending_final': 'admin', 'approved': 'business',
+        'rejected': 'system', 'superseded': 'system',
+    }
+    groups: dict[str, dict] = {}
+    for row in credit_rows:
+        item = dict(row); key = item['customer_key'] or key_for(item['customer_name'])
+        group = groups.setdefault(key, {'customer_key': key, 'customer_name': item['customer_name'], 'credit_cases': [], 'contracts': [], 'updated_at': 0, 'open_contract_tasks': 0})
+        role = credit_role.get(item['status'], 'system')
+        item['responsible_role'] = role
+        item['responsible_name'] = item.get('assigned_name') or ROLE_DISPLAY.get(role, '系统')
+        group['credit_cases'].append(item)
+        group['updated_at'] = max(group['updated_at'], item.get('updated_at') or item.get('created_at') or 0)
+    for row in contract_rows:
+        item = dict(row); key = key_for(item['customer_name'])
+        group = groups.setdefault(key, {'customer_key': key, 'customer_name': item['customer_name'], 'credit_cases': [], 'contracts': [], 'updated_at': 0, 'open_contract_tasks': 0})
+        role = _responsibility(item.get('current_task_type') or '', item.get('current_stage') or '')
+        item['responsible_role'] = role
+        item['responsible_name'] = item.get('assigned_name') or ROLE_DISPLAY.get(role, '系统')
+        group['contracts'].append(item)
+        group['open_contract_tasks'] += int(item.get('open_tasks') or 0)
+        group['updated_at'] = max(group['updated_at'], item.get('updated_at') or item.get('created_at') or 0)
+    items = list(groups.values())
+    for item in items:
+        item['credit_cases'].sort(key=lambda x: (x.get('updated_at') or 0, x.get('version') or 0), reverse=True)
+        item['contracts'].sort(key=lambda x: (x.get('updated_at') or 0, x.get('created_at') or 0), reverse=True)
+        item['latest_credit'] = item['credit_cases'][0] if item['credit_cases'] else None
+        actions = []
+        latest = item['latest_credit']
+        if latest and latest.get('status') not in {'approved', 'rejected', 'superseded'}:
+            actions.append({'source_type': 'credit', 'target_id': latest['case_id'], 'stage': latest['status'],
+                            'responsible_role': latest['responsible_role'], 'responsible_name': latest['responsible_name'],
+                            'updated_at': latest.get('updated_at') or latest.get('created_at') or 0})
+        for contract in item['contracts']:
+            if contract.get('current_stage') not in {'ready_to_sign', 'archived', 'cancelled'}:
+                actions.append({'source_type': 'contract', 'target_id': contract['case_id'], 'stage': contract['current_stage'],
+                                'responsible_role': contract['responsible_role'], 'responsible_name': contract['responsible_name'],
+                                'updated_at': contract.get('updated_at') or contract.get('created_at') or 0,
+                                'filename': contract.get('filename') or ''})
+        item['current_actions'] = sorted(actions, key=lambda x: x['updated_at'], reverse=True)
+    return sorted(items, key=lambda x: x['updated_at'], reverse=True)[:max_items]
+
+
+def get_customer_workspace(customer_key: str, actor: dict) -> dict | None:
+    key = ''.join((customer_key or '').strip().lower().split())[:200]
+    if not key:
+        return None
+    return next((item for item in list_customer_workspaces(actor, 500) if item['customer_key'] == key), None)
 
 def get_case_center(case_id: str, actor: dict | None=None) -> dict | None:
     init_db()
@@ -1144,18 +1302,28 @@ def get_case_center(case_id: str, actor: dict | None=None) -> dict | None:
         docs = c.execute('''SELECT d.*,r.status AS review_status,r.overall_level,r.n_risks,r.high,r.mid,r.low
                             FROM case_documents d LEFT JOIN reviews r ON r.id=d.job_id WHERE d.case_id=? ORDER BY d.created_at DESC''', (case_id,)).fetchall()
         item['documents'] = [dict(doc) for doc in docs]
+        versioned = [doc for doc in item['documents'] if doc.get('document_role') in {'main', 'revision'}]
+        current_job_id = versioned[0].get('job_id') if versioned else ''
+        for doc in item['documents']:
+            doc['is_current_version'] = bool(current_job_id and doc.get('job_id') == current_job_id)
         task_where = 'WHERE case_id=?'; task_params: list[Any] = [case_id]
         if actor and actor.get('role') == 'director':
             task_where += " AND (assignee_id=? OR task_type='approval')"; task_params.append(actor.get('id'))
         item['tasks'] = [dict(task) for task in c.execute(f'SELECT * FROM workflow_tasks {task_where} ORDER BY CASE status WHEN "open" THEN 0 ELSE 1 END, due_at, created_at DESC', task_params)]
+        current_task = next((task for task in item['tasks'] if task.get('status') == 'open'), None)
+        role = _responsibility((current_task or {}).get('task_type') or '', item.get('current_stage') or '')
+        item['responsible_role'] = role
+        if current_task and current_task.get('assignee_id'):
+            owner = c.execute('SELECT display_name FROM users WHERE id=?', (current_task['assignee_id'],)).fetchone()
+            item['responsible_name'] = owner['display_name'] if owner else ROLE_DISPLAY.get(role, '系统')
+        else:
+            item['responsible_name'] = ROLE_DISPLAY.get(role, '系统')
         item['events'] = [dict(event) for event in c.execute('SELECT * FROM case_events WHERE case_id=? ORDER BY created_at DESC LIMIT 100', (case_id,))]
         return item
 
 def _case_for_job(job_id: str) -> str | None:
     with _lock, _conn() as c:
         row = c.execute('SELECT case_id FROM case_documents WHERE job_id=?', (job_id,)).fetchone()
-        if not row:
-            row = c.execute('SELECT case_id FROM reviews WHERE id=?', (job_id,)).fetchone()
         return row['case_id'] if row else None
 
 def attach_document_to_case(case_id: str, job_id: str, filename: str, actor: dict, document_role: str='main', source_document_id: str='') -> dict:
@@ -1189,6 +1357,19 @@ ACTION_TRANSITIONS = {
     'cancel': (CASE_STAGES - {'archived', 'cancelled'}, 'cancelled'),
 }
 
+
+def _current_version_job_id(c, case_id: str) -> str:
+    """The newest main/revision is the only version eligible to close a case.
+
+    Historical versions remain available for comparison and audit, but their
+    risk approvals and material requests must not keep a superseding revision
+    from becoming signable.
+    """
+    row = c.execute('''SELECT job_id FROM case_documents
+                       WHERE case_id=? AND document_role IN ('main','revision')
+                       ORDER BY created_at DESC LIMIT 1''', (case_id,)).fetchone()
+    return str(row['job_id'] or '') if row else ''
+
 def transition_case(case_id: str, action: str, actor: dict, note: str='', assignee_id: str='') -> dict:
     if action not in ACTION_TRANSITIONS:
         raise ValueError('不支持的案件动作')
@@ -1211,6 +1392,20 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
         current = row['current_stage'] or row['status']; allowed, target = ACTION_TRANSITIONS[action]
         if current not in allowed:
             raise ValueError(f'案件当前处于“{current}”，不能执行“{action}”')
+        task_for_action = {
+            'request_material': 'legal_review', 'submit_approval': 'legal_review',
+            'ready_for_signing': 'legal_review', 'escalate_final': 'approval',
+            'approve_for_signing': 'approval' if current == 'approval' else 'final_approval',
+            'final_approve_for_signing': 'final_approval',
+            'return_to_reviewer': 'approval' if current == 'approval' else 'final_approval',
+            'return_to_business': 'approval' if current == 'approval' else 'final_approval',
+        }.get(action)
+        if task_for_action and actor.get('role') != 'admin':
+            owner = c.execute('''SELECT assignee_id FROM workflow_tasks
+                                 WHERE case_id=? AND task_type=? AND status='open'
+                                 ORDER BY created_at DESC LIMIT 1''', (case_id, task_for_action)).fetchone()
+            if owner and owner['assignee_id'] and owner['assignee_id'] != actor.get('id'):
+                raise ValueError('该合同待办已自动分派给其他负责人，请由负责人处理')
         if action in {'ready_for_signing', 'approve_for_signing', 'final_approve_for_signing'}:
             pending_types = "('approval','material')" if action == 'ready_for_signing' else "('material')"
             pending = c.execute(f"SELECT COUNT(*) AS n FROM workflow_tasks WHERE case_id=? AND status='open' AND task_type IN {pending_types}", (case_id,)).fetchone()['n']
@@ -1219,15 +1414,13 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
             # Contract-rule approvals and material requests are stored with
             # each reviewed document.  Checking them here prevents the case
             # stage button from bypassing the stricter per-finding workflow.
-            required = c.execute('''SELECT DISTINCT fa.required_role FROM finding_approvals fa
-                                    JOIN case_documents d ON d.job_id=fa.job_id
-                                    WHERE d.case_id=?''', (case_id,)).fetchall()
-            unresolved = c.execute('''SELECT COUNT(*) AS n FROM finding_approvals fa
-                                      JOIN case_documents d ON d.job_id=fa.job_id
-                                      WHERE d.case_id=? AND fa.status<>'approved' ''', (case_id,)).fetchone()['n']
-            materials = c.execute('''SELECT COUNT(*) AS n FROM material_requests mr
-                                     JOIN case_documents d ON d.job_id=mr.job_id
-                                     WHERE d.case_id=? AND mr.status='open' ''', (case_id,)).fetchone()['n']
+            current_job_id = _current_version_job_id(c, case_id)
+            required = c.execute('''SELECT DISTINCT required_role FROM finding_approvals
+                                    WHERE job_id=?''', (current_job_id,)).fetchall()
+            unresolved = c.execute('''SELECT COUNT(*) AS n FROM finding_approvals
+                                      WHERE job_id=? AND status<>'approved' ''', (current_job_id,)).fetchone()['n']
+            materials = c.execute('''SELECT COUNT(*) AS n FROM material_requests
+                                     WHERE job_id=? AND status='open' ''', (current_job_id,)).fetchone()['n']
             if unresolved or materials:
                 raise ValueError('仍有未完成或未通过的条款审批/补件，不能进入可签约状态')
             required_roles = {item['required_role'] for item in required}
@@ -1304,17 +1497,17 @@ def my_work_items(actor: dict, limit: int=100) -> list[dict]:
 
         role = actor.get('role')
         if role == 'business':
-            credit_where = "created_by=? AND status NOT IN ('approved','rejected','superseded')"
+            credit_where = "assigned_to=? AND status='returned_to_business'"
             credit_args: list[Any] = [actor.get('id')]
         elif role == 'reviewer':
-            credit_where = "status IN ('draft','returned_to_reviewer')"
-            credit_args = []
+            credit_where = "assigned_to=? AND status IN ('draft','returned_to_reviewer')"
+            credit_args = [actor.get('id')]
         elif role == 'director':
-            credit_where = "status='pending_director'"
-            credit_args = []
+            credit_where = "assigned_to=? AND status='pending_director'"
+            credit_args = [actor.get('id')]
         else:
-            credit_where = "status='pending_final'"
-            credit_args = []
+            credit_where = "assigned_to=? AND status='pending_final'"
+            credit_args = [actor.get('id')]
         credit_rows = c.execute(f'''SELECT case_id,customer_name,status,request_note,return_note,return_target,
                                            created_at,updated_at,submitted_at,business_type
                                     FROM credit_cases WHERE {credit_where}
@@ -1339,11 +1532,141 @@ def my_work_items(actor: dict, limit: int=100) -> list[dict]:
             })
     return (credit_items + contract_items)[:min(max(limit, 1), 500)]
 
+
+# ---- user-facing OA workboxes -------------------------------------------
+# These four boxes are the primary user model.  “Credit”, “contract”,
+# “case” and “workflow task” remain implementation details carried only as
+# source_type/target_id so the UI can open the correct execution page.
+WORKBOXES = {'todo', 'in_progress', 'draft', 'done'}
+
+
+def list_workbox(actor: dict, bucket: str='todo', limit: int=200) -> list[dict]:
+    if bucket not in WORKBOXES:
+        raise ValueError('工作箱仅支持 todo、in_progress、draft 或 done')
+    init_db()
+    max_items = min(max(limit, 1), 500)
+    actor_id = actor.get('id') or ''
+    role = actor.get('role') or ''
+    with _lock, _conn() as c:
+        items: list[dict] = []
+        if bucket == 'todo':
+            task_rows = c.execute('''SELECT t.*,c.customer_name,c.current_stage,c.priority,c.updated_at,
+                                            (SELECT original_name FROM case_documents d WHERE d.case_id=c.case_id ORDER BY d.created_at DESC LIMIT 1) AS filename
+                                     FROM workflow_tasks t JOIN contract_cases c ON c.case_id=t.case_id
+                                     WHERE t.status='open' AND t.assignee_id=?
+                                     ORDER BY c.updated_at DESC,t.created_at DESC LIMIT ?''', (actor_id, max_items)).fetchall()
+            for row in task_rows:
+                task = dict(row)
+                # A business-created, not-yet-submitted file request belongs in
+                # 草稿, not 待办.  It remains a real task in storage so audit and
+                # automatic ownership are intact.
+                if role == 'business' and task['task_type'] in {'credit_required', 'document_required'} and task['current_stage'] in {'draft', 'awaiting_credit'}:
+                    continue
+                task.update({'bucket': bucket, 'source_type': 'contract', 'target_id': task['case_id'],
+                             'kind_label': '合同', 'action_hint': task['detail'] or '进入事项继续处理。',
+                             'responsible_role': _responsibility(task['task_type'], task['current_stage']),
+                             'responsible_name': '我'})
+                items.append(task)
+            credit_rows = c.execute('''SELECT cc.case_id,cc.customer_name,cc.status,cc.business_type,cc.updated_at,cc.created_at,
+                                              cc.request_note,cc.return_note,u.display_name AS assigned_name
+                                       FROM credit_cases cc LEFT JOIN users u ON u.id=cc.assigned_to
+                                       WHERE cc.assigned_to=? AND cc.status IN ('draft','returned_to_reviewer','returned_to_business','pending_director','pending_final')
+                                       ORDER BY cc.updated_at DESC LIMIT ?''', (actor_id, max_items)).fetchall()
+            for row in credit_rows:
+                item = dict(row)
+                labels = {'draft': '完成信审评估', 'returned_to_reviewer': '按意见修订信审', 'returned_to_business': '补充信审材料', 'pending_director': '复核信审条件', 'pending_final': '进行最终信审批核'}
+                item.update({'task_id': f"credit:{item['case_id']}", 'bucket': bucket, 'source_type': 'credit', 'target_id': item['case_id'],
+                             'case_id': item['case_id'], 'current_stage': item['status'], 'priority': 'normal', 'filename': '',
+                             'title': labels.get(item['status'], '处理客户信审'), 'detail': item.get('return_note') or item.get('request_note') or '进入信审查看详情。',
+                             'kind_label': '信审', 'action_hint': item.get('return_note') or '进入事项继续处理。',
+                             'responsible_role': role, 'responsible_name': '我'})
+                items.append(item)
+        elif bucket == 'draft':
+            draft_cases = c.execute('''SELECT c.case_id,c.customer_name,c.current_stage,c.priority,c.created_at,c.updated_at,c.request_note,
+                                              (SELECT original_name FROM case_documents d WHERE d.case_id=c.case_id ORDER BY d.created_at DESC LIMIT 1) AS filename
+                                       FROM contract_cases c
+                                       WHERE c.created_by=? AND c.current_stage IN ('draft','awaiting_credit')
+                                       ORDER BY c.updated_at DESC LIMIT ?''', (actor_id, max_items)).fetchall()
+            for row in draft_cases:
+                item = dict(row); needs_credit = item['current_stage'] == 'awaiting_credit'
+                item.update({'task_id': f"draft-contract:{item['case_id']}", 'bucket': bucket, 'source_type': 'contract', 'target_id': item['case_id'],
+                             'kind_label': '合同草稿', 'title': '先绑定有效信审' if needs_credit else '继续上传合同文件',
+                             'detail': '该合同尚未正式进入审查流程。', 'action_hint': '补全信息后提交，系统将自动转交下一岗位。',
+                             'responsible_role': 'business', 'responsible_name': '我'})
+                items.append(item)
+            credit_drafts = c.execute('''SELECT case_id,customer_name,status,business_type,created_at,updated_at,request_note
+                                         FROM credit_cases WHERE created_by=? AND status='draft'
+                                         ORDER BY updated_at DESC LIMIT ?''', (actor_id, max_items)).fetchall()
+            for row in credit_drafts:
+                item = dict(row)
+                item.update({'task_id': f"draft-credit:{item['case_id']}", 'bucket': bucket, 'source_type': 'credit', 'target_id': item['case_id'],
+                             'current_stage': 'draft', 'priority': 'normal', 'filename': '', 'kind_label': '信审草稿',
+                             'title': '完善客户信审草稿', 'detail': item.get('request_note') or '补齐材料后交由信用审核专员评估。',
+                             'action_hint': '进入信审补齐材料和申请信息。', 'responsible_role': 'business', 'responsible_name': '我'})
+                items.append(item)
+        elif bucket == 'in_progress':
+            access = 'c.created_by=?' if role == 'business' else "(c.assigned_to=? OR EXISTS (SELECT 1 FROM workflow_tasks wt WHERE wt.case_id=c.case_id AND (wt.assignee_id=? OR wt.completed_by=?)))"
+            params = [actor_id] if role == 'business' else [actor_id, actor_id, actor_id]
+            rows = c.execute(f'''SELECT c.case_id,c.customer_name,c.current_stage,c.priority,c.created_at,c.updated_at,c.request_note,
+                                         (SELECT original_name FROM case_documents d WHERE d.case_id=c.case_id ORDER BY d.created_at DESC LIMIT 1) AS filename,
+                                         (SELECT task_type FROM workflow_tasks wt WHERE wt.case_id=c.case_id AND wt.status='open' ORDER BY wt.created_at DESC LIMIT 1) AS task_type,
+                                         (SELECT u.display_name FROM workflow_tasks wt LEFT JOIN users u ON u.id=wt.assignee_id WHERE wt.case_id=c.case_id AND wt.status='open' ORDER BY wt.created_at DESC LIMIT 1) AS owner_name
+                                  FROM contract_cases c
+                                  WHERE {access} AND c.current_stage NOT IN ('draft','awaiting_credit','archived','cancelled')
+                                  AND NOT EXISTS (SELECT 1 FROM workflow_tasks wt WHERE wt.case_id=c.case_id AND wt.status='open' AND wt.assignee_id=?)
+                                  ORDER BY c.updated_at DESC LIMIT ?''', (*params, actor_id, max_items)).fetchall()
+            for row in rows:
+                item = dict(row); owner_role = _responsibility(item.get('task_type') or '', item['current_stage'])
+                item.update({'task_id': f"progress-contract:{item['case_id']}", 'bucket': bucket, 'source_type': 'contract', 'target_id': item['case_id'],
+                             'kind_label': '合同', 'title': '合同正在推进', 'detail': f"当前处于 {item['current_stage']}。",
+                             'action_hint': f"等待 {ROLE_DISPLAY.get(owner_role, '系统')} · {item.get('owner_name') or ROLE_DISPLAY.get(owner_role, '系统')} 处理。",
+                             'responsible_role': owner_role, 'responsible_name': item.get('owner_name') or ROLE_DISPLAY.get(owner_role, '系统')})
+                items.append(item)
+            credit_access = 'created_by=?' if role == 'business' else '(assigned_to=? OR reviewed_by=? OR director_by=? OR decided_by=?)'
+            credit_params = [actor_id] if role == 'business' else [actor_id, actor_id, actor_id, actor_id]
+            credit_rows = c.execute(f'''SELECT cc.case_id,cc.customer_name,cc.status,cc.business_type,cc.created_at,cc.updated_at,cc.request_note,
+                                               u.display_name AS owner_name
+                                        FROM credit_cases cc LEFT JOIN users u ON u.id=cc.assigned_to
+                                        WHERE {credit_access} AND cc.status NOT IN ('draft','approved','rejected','superseded') AND cc.assigned_to<>?
+                                        ORDER BY cc.updated_at DESC LIMIT ?''', (*credit_params, actor_id, max_items)).fetchall()
+            for row in credit_rows:
+                item = dict(row); owner_role = {'returned_to_business':'business','returned_to_reviewer':'reviewer','pending_director':'director','pending_final':'admin'}.get(item['status'], 'system')
+                item.update({'task_id': f"progress-credit:{item['case_id']}", 'bucket': bucket, 'source_type': 'credit', 'target_id': item['case_id'],
+                             'current_stage': item['status'], 'priority': 'normal', 'filename': '', 'kind_label': '信审', 'title': '信审正在推进',
+                             'detail': item.get('request_note') or '等待当前责任人处理。', 'action_hint': f"等待 {ROLE_DISPLAY.get(owner_role, '系统')} · {item.get('owner_name') or ROLE_DISPLAY.get(owner_role, '系统')} 处理。",
+                             'responsible_role': owner_role, 'responsible_name': item.get('owner_name') or ROLE_DISPLAY.get(owner_role, '系统')})
+                items.append(item)
+        else:  # done
+            rows = c.execute('''SELECT t.task_id,t.case_id,t.task_type,t.title,t.detail,t.completed_at,c.customer_name,c.current_stage,c.priority,c.updated_at,
+                                       (SELECT original_name FROM case_documents d WHERE d.case_id=c.case_id ORDER BY d.created_at DESC LIMIT 1) AS filename
+                                FROM workflow_tasks t JOIN contract_cases c ON c.case_id=t.case_id
+                                WHERE t.status='completed' AND t.completed_by=?
+                                ORDER BY t.completed_at DESC LIMIT ?''', (actor_id, max_items)).fetchall()
+            for row in rows:
+                item = dict(row); item['created_at'] = item.get('completed_at') or item.get('updated_at')
+                item.update({'bucket': bucket, 'source_type': 'contract', 'target_id': item['case_id'], 'kind_label': '合同',
+                             'action_hint': '已完成，可进入查看处理记录。', 'responsible_role': role, 'responsible_name': '我'})
+                items.append(item)
+            credit_rows = c.execute('''SELECT case_id,customer_name,status,business_type,updated_at,created_at,request_note
+                                       FROM credit_cases
+                                       WHERE reviewed_by=? OR director_by=? OR decided_by=?
+                                       ORDER BY updated_at DESC LIMIT ?''', (actor_id, actor_id, actor_id, max_items)).fetchall()
+            for row in credit_rows:
+                item = dict(row)
+                item.update({'task_id': f"done-credit:{item['case_id']}", 'bucket': bucket, 'source_type': 'credit', 'target_id': item['case_id'],
+                             'current_stage': item['status'], 'priority': 'normal', 'filename': '', 'kind_label': '信审',
+                             'title': '已处理客户信审', 'detail': item.get('request_note') or '已完成本人环节。',
+                             'action_hint': '已办结，可进入查看详情。', 'responsible_role': role, 'responsible_name': '我'})
+                items.append(item)
+    return sorted(items, key=lambda item: item.get('completed_at') or item.get('updated_at') or item.get('created_at') or 0, reverse=True)[:max_items]
+
 # ---- review persistence, protected mapping, actions ----
 def create_pending(job_id, filename, path, actor=None, business_type='', assignee_id='', priority='normal', due_at=None, request_note='', parent_job_id='', rule_version='contract-v1', credit_case=None, case_id='', document_role='main'):
     init_db(); now=time.time(); case_id=(case_id or '').strip()
     if not credit_case:
         raise ValueError('合同必须绑定已生效的信审版本')
+    if not case_id:
+        raise ValueError('合同审查必须先创建案件，并通过 case_id 上传文件版本')
     credit_snapshot = {
         'case_id': credit_case['case_id'], 'customer_name': credit_case['customer_name'],
         'version': credit_case['version'], 'conditions': credit_case['conditions'],
@@ -1355,16 +1678,9 @@ def create_pending(job_id, filename, path, actor=None, business_type='', assigne
             root = c.execute('SELECT case_id FROM contract_cases WHERE case_id=?', (existing_case_id,)).fetchone()
             if not root:
                 raise ValueError('合同案件不存在')
-        else:
-            existing_case_id = 'CASE-'+uuid.uuid4().hex[:12].upper()
         c.execute('''INSERT OR REPLACE INTO reviews(id,filename,status,created_at,finished_at,overall_level,n_clauses,n_risks,high,mid,low,masked_entities,our_party,business_type,report_encrypted,file_path,case_id,created_by,rule_version,credit_case_id,credit_version,credit_snapshot_json)
                      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                   (job_id,filename,'running',now,0,'',0,0,0,0,0,0,'',business_type,None,path,existing_case_id,(actor or {}).get('id'),rule_version,credit_case['case_id'],credit_case['version'],json.dumps(credit_snapshot, ensure_ascii=False)))
-        if not case_id:
-            c.execute('''INSERT INTO contract_cases(case_id,job_id,business_type,status,created_by,created_at,updated_at,assigned_to,priority,due_at,request_note,customer_name,current_stage,credit_case_id)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                      (existing_case_id,job_id,business_type,'ai_review',(actor or {}).get('id'),now,now,assignee_id or None,priority,due_at,request_note.strip(),credit_case.get('customer_name',''),'ai_review',credit_case.get('case_id','')))
-            _case_event(c, existing_case_id, 'case.created', '已从合同上传创建案件', actor, {'job_id': job_id})
         parent = parent_job_id or None
         version = 'V1'
         if parent:
@@ -1416,8 +1732,6 @@ def save_review(job_id, report, status='done', error=None, actor=None, mapping=N
         c.execute('''UPDATE reviews SET status=?,finished_at=?,overall_level=?,n_clauses=?,n_risks=?,high=?,mid=?,low=?,masked_entities=?,our_party=?,business_type=?,report_encrypted=?,rule_version=? WHERE id=?''',
           (status,now,sm.get('overall_level',''),int(sm.get('n_clauses',0) or 0),int(sm.get('n_risks',0) or 0),int(sm.get('high',0) or 0),int(sm.get('mid',0) or 0),int(sm.get('low',0) or 0),int(report.get('masked_entities',0) or 0),f.get('our_party',''),f.get('business_type',''),encrypted,rule_version,job_id))
         workflow_status = 'pending_review' if status == 'done' else 'failed'
-        c.execute('UPDATE contract_cases SET status=?,current_stage=?,updated_at=? WHERE job_id=?',
-                  (workflow_status, 'legal_review' if status == 'done' else 'cancelled', now, job_id))
         if old and old['case_id']:
             still_running = c.execute('''SELECT COUNT(*) AS n FROM case_documents d JOIN reviews rr ON rr.id=d.job_id
                                          WHERE d.case_id=? AND rr.status='running' ''', (old['case_id'],)).fetchone()['n']
@@ -1462,13 +1776,6 @@ def _decode_report(row):
     d['report']=decrypt_json(protected)
     return d
 
-def list_history(limit=50, offset=0):
-    init_db()
-    with _lock, _conn() as c:
-        rows=c.execute('''SELECT id,filename,status,created_at,finished_at,overall_level,n_clauses,n_risks,high,mid,low,masked_entities,our_party,business_type,case_id,created_by FROM reviews ORDER BY created_at DESC LIMIT ? OFFSET ?''',(limit,offset)).fetchall()
-        return [dict(r) for r in rows]
-
-CASE_STATUSES = {'running', 'pending_review', 'in_review', 'returned', 'approved', 'closed', 'failed'}
 CASE_PRIORITIES = {'low', 'normal', 'high', 'urgent'}
 
 def list_reviewers():
@@ -1476,46 +1783,10 @@ def list_reviewers():
         rows = c.execute("SELECT id,display_name,role FROM users WHERE active=1 AND role IN ('admin','reviewer') ORDER BY display_name").fetchall()
         return [dict(r) for r in rows]
 
-def list_cases(actor: dict, limit=100):
-    init_db()
-    with _lock, _conn() as c:
-        where = ''
-        params: list[Any] = []
-        if actor.get('role') == 'business':
-            where = 'WHERE c.created_by=?'
-            params.append(actor.get('id'))
-        rows = c.execute(f'''SELECT c.case_id,c.job_id,c.status AS workflow_status,c.priority,c.due_at,c.request_note,c.created_by,c.created_at,c.updated_at,
-                                    c.assigned_to,r.filename,r.status AS review_status,r.overall_level,r.n_clauses,r.n_risks,r.high,r.mid,r.low,
-                                    creator.display_name AS requester_name, assignee.display_name AS assignee_name
-                             FROM contract_cases c
-                             JOIN reviews r ON r.id=c.job_id
-                             LEFT JOIN users creator ON creator.id=c.created_by
-                             LEFT JOIN users assignee ON assignee.id=c.assigned_to
-                             {where} ORDER BY CASE c.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, c.updated_at DESC LIMIT ?''', (*params, limit)).fetchall()
-        return [dict(r) for r in rows]
-
-def update_case(job_id: str, body: dict, actor: dict):
-    allowed = {'assigned_to', 'priority', 'due_at', 'request_note', 'status'}
-    changes = {key: value for key, value in body.items() if key in allowed}
-    if not changes: raise ValueError('没有可更新的案件字段')
-    if 'priority' in changes and changes['priority'] not in CASE_PRIORITIES: raise ValueError('不支持的优先级')
-    if 'status' in changes and changes['status'] not in CASE_STATUSES: raise ValueError('不支持的案件状态')
-    if 'assigned_to' in changes and changes['assigned_to']:
-        reviewer = get_user(changes['assigned_to'])
-        if not reviewer or not reviewer.get('active') or reviewer.get('role') not in {'admin','reviewer'}: raise ValueError('只能指派给启用的信用审核专员')
-    if 'request_note' in changes: changes['request_note'] = str(changes['request_note'] or '').strip()[:1000]
-    fields=[]; values=[]
-    for key, value in changes.items():
-        fields.append(f'{key}=?'); values.append(value or None if key == 'assigned_to' else value)
-    fields.append('updated_at=?'); values.append(time.time()); values.append(job_id)
-    with _lock, _conn() as c:
-        c.execute(f'UPDATE contract_cases SET {",".join(fields)} WHERE job_id=?', values)
-        if c.total_changes == 0: raise ValueError('案件不存在')
-    return get_case(job_id)
-
 def get_case(job_id: str):
-    cases = [row for row in list_cases({'role': 'admin'}, 500) if row['job_id'] == job_id]
-    return cases[0] if cases else None
+    """Return the owning case-centre case for a document review job."""
+    case_id = _case_for_job(job_id)
+    return get_case_center(case_id) if case_id else None
 
 def get_review(job_id):
     init_db()
@@ -1653,7 +1924,8 @@ def batch_matrix(actor: dict):
     with _lock, _conn() as c:
         query = '''SELECT r.id,r.filename,r.overall_level,r.high,r.mid,c.priority,c.due_at,
                           GROUP_CONCAT(DISTINCT f.rule_id) AS rule_ids
-                   FROM reviews r JOIN contract_cases c ON c.job_id=r.id
+                   FROM reviews r JOIN case_documents d ON d.job_id=r.id
+                   JOIN contract_cases c ON c.case_id=d.case_id
                    LEFT JOIN review_findings f ON f.job_id=r.id'''
         params = []
         if actor.get('role') == 'business':
@@ -1703,7 +1975,7 @@ def delete_review(job_id):
     with _lock, _conn() as c:
         r=c.execute('SELECT file_path FROM reviews WHERE id=?',(job_id,)).fetchone(); fp=r['file_path'] if r else None
         material_paths = [row['stored_path'] for row in c.execute('SELECT stored_path FROM material_files WHERE job_id=?', (job_id,))]
-        c.execute('DELETE FROM review_actions WHERE finding_id IN (SELECT finding_id FROM review_findings WHERE job_id=?)',(job_id,)); c.execute('DELETE FROM finding_approvals WHERE job_id=?',(job_id,)); c.execute('DELETE FROM material_files WHERE job_id=?',(job_id,)); c.execute('DELETE FROM material_requests WHERE job_id=?',(job_id,)); c.execute('DELETE FROM export_snapshots WHERE job_id=?',(job_id,)); c.execute('DELETE FROM contract_versions WHERE job_id=?',(job_id,)); c.execute('DELETE FROM review_findings WHERE job_id=?',(job_id,)); c.execute('DELETE FROM mask_mappings WHERE task_id=?',(job_id,)); c.execute('DELETE FROM contract_cases WHERE job_id=?',(job_id,)); c.execute('DELETE FROM reviews WHERE id=?',(job_id,))
+        c.execute('DELETE FROM review_actions WHERE finding_id IN (SELECT finding_id FROM review_findings WHERE job_id=?)',(job_id,)); c.execute('DELETE FROM finding_approvals WHERE job_id=?',(job_id,)); c.execute('DELETE FROM material_files WHERE job_id=?',(job_id,)); c.execute('DELETE FROM material_requests WHERE job_id=?',(job_id,)); c.execute('DELETE FROM export_snapshots WHERE job_id=?',(job_id,)); c.execute('DELETE FROM contract_versions WHERE job_id=?',(job_id,)); c.execute('DELETE FROM review_findings WHERE job_id=?',(job_id,)); c.execute('DELETE FROM mask_mappings WHERE task_id=?',(job_id,)); c.execute('DELETE FROM case_documents WHERE job_id=?',(job_id,)); c.execute('DELETE FROM reviews WHERE id=?',(job_id,))
     if fp and os.path.exists(fp):
         try: os.remove(fp)
         except OSError: pass

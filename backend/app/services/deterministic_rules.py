@@ -14,6 +14,17 @@ _SUPPLIER_LIABILITY = re.compile(r'(?:乙方|供应商|卖方|supplier|seller)[^
 _CANCEL = re.compile(r'(?:取消|撤销|变更|调整).{0,28}(?:订单|预测|purchase\s*order|forecast)', re.I)
 _NO_FAULT = re.compile(r'(?:无责任|无需承担|不承担.{0,8}(?:责任|费用|赔偿)|without\s+(?:liability|charge)|at\s+(?:its|buyer.{0,8})\s+discretion)', re.I)
 _VMI = re.compile(r'\b(?:VMI|JIT|vendor\s*managed\s*inventory|just[ -]?in[ -]?time)\b|供应商管理库存|准时制', re.I)
+_VMI_NEGATION = re.compile(r'(?:不(?:采用|使用|含有?|包含|涉及)|未(?:采用|使用|包含)|禁止(?:采用|使用|包含)?|不得(?:采用|使用|包含)?|无)[^。；;]{0,24}$', re.I)
+
+
+def positive_vmi_match(text: str):
+    """Ignore VMI/JIT terms explicitly negated by the contract clause."""
+    value = text or ''
+    for match in _VMI.finditer(value):
+        prefix = value[max(0, match.start() - 32):match.start()]
+        if not _VMI_NEGATION.search(prefix):
+            return match
+    return None
 
 
 def applicable_rule_ids(text: str, business_type: str) -> list[str]:
@@ -45,6 +56,8 @@ def applicable_rule_ids(text: str, business_type: str) -> list[str]:
             continue
         if rule_id in {'R02', 'R08', 'R15', 'R16'} and business_type != '模塑一体':
             continue
+        if rule_id == 'R16' and not positive_vmi_match(value):
+            continue
         if re.search(pattern, value, re.I):
             result.append(rule_id)
     return result
@@ -69,7 +82,7 @@ def assess_clause(text: str, business_type: str) -> dict[str, dict]:
                 'facts': {'term_days': 91, 'payment_trigger': 'invoice'},
                 'note': '本地提取：月结天数叠加 3 个月信用期，付款账期超过 90 天底线',
             }
-        vmi = _VMI.search(value)
+        vmi = positive_vmi_match(value)
         if vmi:
             findings['R16'] = {
                 'evidence': vmi.group(0),

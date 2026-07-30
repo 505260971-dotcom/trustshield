@@ -93,7 +93,16 @@ export default function SettingsPage({ onSaved }: Props) {
 
   if (loading || !settings) return <Card><Spin /> <Text type="secondary">正在加载系统配置…</Text></Card>
 
-  return <Form form={form} layout="vertical" onFinish={save} initialValues={settings}>
+  return <Form className="role-page settings-page" form={form} layout="vertical" onFinish={save} initialValues={settings}>
+    <section className="page-hero page-hero-light settings-hero">
+      <div><span className="section-kicker">SYSTEM CONFIGURATION</span><Typography.Title level={2}>系统设置</Typography.Title><Typography.Paragraph>集中配置模型服务、脱敏与财务证据检索能力。密钥不会在浏览器中回显；变更保存后，需要重启后端服务才会生效。</Typography.Paragraph></div>
+      <div className="page-hero-actions"><Tag color="blue">管理员专属</Tag><Tag color={settings.llm_api_key_configured?'green':'orange'}>{settings.llm_api_key_configured?'主模型密钥已配置':'主模型密钥待配置'}</Tag></div>
+    </section>
+    <section className="compact-metrics" aria-label="系统配置概览">
+      <div className="compact-metric"><span className="compact-metric-icon"><ApiOutlined/></span><div><small>主审查模型</small><strong>{settings.llm_model?'已配置':'待配置'}</strong><em>{settings.llm_model||'请填写模型名称'}</em></div></div>
+      <div className="compact-metric metric-attention"><span className="compact-metric-icon"><SafetyCertificateOutlined/></span><div><small>合同脱敏</small><strong>{settings.enable_masking?'开启':'关闭'}</strong><em>{settings.smart_mask?'智能脱敏已启用':'使用快速规则或已关闭'}</em></div></div>
+      <div className="compact-metric"><span className="compact-metric-icon"><ApiOutlined/></span><div><small>财报证据抽取</small><strong>{settings.financial_llm_extraction?'开启':'关闭'}</strong><em>{settings.financial_llm_mode||'尚未选择部署模式'}</em></div></div>
+    </section>
     <Alert
       type="info"
       showIcon
@@ -175,7 +184,7 @@ export default function SettingsPage({ onSaved }: Props) {
       </Col>
     </Row>
 
-    <Card style={{ marginTop: 16 }}>
+    <Card className="settings-save-card">
       <Space>
         <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={saving}>保存系统设置</Button>
         <Button onClick={load}>重新读取</Button>

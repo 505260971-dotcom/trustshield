@@ -50,7 +50,7 @@ def _wait_credit(client: TestClient, headers: dict[str, str], case_id: str, asse
 
 def _wait_review(client: TestClient, headers: dict[str, str], job_id: str) -> dict:
     for _ in range(80):
-        response = client.get(f'/api/jobs/{job_id}', headers=headers)
+        response = client.get(f'/api/reviews/{job_id}/status', headers=headers)
         assert response.status_code == 200, response.text
         body = response.json()
         if body['status'] != 'running':

@@ -1,5 +1,7 @@
 param(
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [ValidateRange(1, 65535)]
+    [int]$FrontendPort = 5173
 )
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -18,14 +20,26 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
 }
 
 Write-Host '正在分别启动后端和前端开发服务器…' -ForegroundColor Cyan
-Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-    '-NoExit', '-Command', "Set-Location -LiteralPath '$backendPath'; python -m uvicorn app.main:app --reload --port 8000"
-) | Out-Null
-Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-    '-NoExit', '-Command', "Set-Location -LiteralPath '$frontendPath'; npm run dev"
-) | Out-Null
+$backendRunning = [bool](Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue)
+$frontendRunning = [bool](Get-NetTCPConnection -LocalPort $FrontendPort -State Listen -ErrorAction SilentlyContinue)
 
-Write-Host '后端：http://127.0.0.1:8000  前端：http://127.0.0.1:5173' -ForegroundColor Green
+if ($backendRunning) {
+    Write-Host '后端已在 8000 端口运行，跳过重复启动。' -ForegroundColor Yellow
+} else {
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile', '-Command', "Set-Location -LiteralPath '$backendPath'; python -m uvicorn app.main:app --reload --port 8000"
+    ) | Out-Null
+}
+
+if ($frontendRunning) {
+    Write-Host "前端已在 $FrontendPort 端口运行，跳过重复启动。" -ForegroundColor Yellow
+} else {
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile', '-Command', "Set-Location -LiteralPath '$frontendPath'; npm run dev -- --port $FrontendPort"
+    ) | Out-Null
+}
+
+Write-Host "后端：http://127.0.0.1:8000  前端：http://127.0.0.1:$FrontendPort" -ForegroundColor Green
 if (-not $NoBrowser) {
-    Start-Process 'http://127.0.0.1:5173'
+    Start-Process "http://127.0.0.1:$FrontendPort"
 }

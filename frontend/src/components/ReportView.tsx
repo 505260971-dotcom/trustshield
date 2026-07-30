@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
-import { Card, Row, Col, Statistic, Result, Tabs, Table, Descriptions, Empty, List, Button, Space, Typography, Alert, Tag, message, Modal, Input, Select } from 'antd'
+import { Card, Row, Col, Statistic, Result, Tabs, Table, Descriptions, Empty, List, Button, Dropdown, Space, Typography, Alert, Tag, message, Modal, Input, Select } from 'antd'
 import { DownloadOutlined, SafetyCertificateOutlined, ReloadOutlined, FileWordOutlined, TranslationOutlined, SwapOutlined, FileTextOutlined } from '@ant-design/icons'
 import type { KnowledgeItem, Report, Risk, RuleItem } from '../types'
 import { riskTableCols, clauseTableCols, overallColor, downloadText, roleRiskVisible, roleRiskHighlight } from './common'
@@ -137,7 +137,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   }
   const columns = [...riskTableCols,
     {title:'定位',width:90,fixed:'right' as const,render:(_:any,r:Risk)=> <Button size="small" type="link" onClick={()=>jumpToClause(r.clause_id)}>原文</Button>},
-    {title:'处置',width:160,fixed:'right' as const,render:(_:any,r:Risk)=>{const creditBlocked=r.rule_id?.startsWith('CREDIT_');return <Space direction="vertical" size={2}>{r.action_status&&<Tag color={r.action_status==='ignored'?'default':'green'}>{r.action_status}</Tag>}{creditBlocked?<Tag color="red">仅可更新信审后复审</Tag>:canAct&&<Button size="small" onClick={()=>openAction(r)}>采纳 / 忽略</Button>}</Space>}}
+    {title:'处置',width:160,fixed:'right' as const,render:(_:any,r:Risk)=>{const creditBlocked=r.rule_id?.startsWith('CREDIT_');return <Space direction="vertical" size={2}>{r.action_status&&<Tag color={r.action_status==='ignored'?'default':'green'}>{r.action_status==='ignored'?'已确认不适用':r.action_status}</Tag>}{creditBlocked?<Tag color="red">仅可更新信审后复审</Tag>:canAct&&<Button size="small" onClick={()=>openAction(r)}>处理风险</Button>}</Space>}}
   ]
 
   return (
@@ -161,15 +161,11 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
 
       <Card title={`风险清单（${visibleRisks.length} 条${hidden>0?` · 当前视角已过滤 ${hidden} 条`:''}）`} extra={
         <Space wrap>
-          <Button icon={<DownloadOutlined/>} onClick={exportMarkdown}>导出 Markdown</Button>
-          <Button icon={<FileWordOutlined/>} loading={exporting==='revised'} onClick={()=>exportWord('revised')} disabled={!jid}>导出修订建议稿</Button>
-          <Button icon={<FileTextOutlined/>} loading={exporting==='plain'} onClick={()=>exportWord('plain')} disabled={!jid}>导出原文版</Button>
-          <Button icon={<FileWordOutlined/>} loading={exporting.startsWith('bilingual')} onClick={()=>exportWord('bilingual', activeLang)} disabled={!jid}>导出双语稿</Button>
+          <Dropdown menu={{items:[{key:'revised',label:'导出修订建议稿',icon:<FileWordOutlined/>,disabled:!jid},{key:'plain',label:'导出原文留档',icon:<FileTextOutlined/>,disabled:!jid},{key:'bilingual',label:`导出双语对照稿（${activeLang.toUpperCase()}）`,icon:<FileWordOutlined/>,disabled:!jid},{type:'divider'},{key:'markdown',label:'导出 Markdown',icon:<DownloadOutlined/>},{key:'json',label:'导出 JSON'}],onClick:({key})=>{if(key==='revised')exportWord('revised');else if(key==='plain')exportWord('plain');else if(key==='bilingual')exportWord('bilingual',activeLang);else if(key==='markdown')exportMarkdown();else if(key==='json')downloadText(`${report.filename}.json`, JSON.stringify(report,null,2),'application/json')}}}><Button icon={<DownloadOutlined/>} loading={!!exporting}>导出交付物</Button></Dropdown>
           <Select size="small" value={activeLang} style={{width:110}} onChange={setActiveLang}
             options={[{value:'en',label:'英语'},{value:'vi',label:'越南语'},{value:'ja',label:'日语'},{value:'es',label:'西语'}]} />
           {showVersionCompare&&<Button icon={<SwapOutlined/>} onClick={()=>{setCompareOpen(true);setComparison(null)}} disabled={!jid}>版本对比</Button>}
           <Button icon={<TranslationOutlined/>} onClick={()=>setTransOpen(true)} disabled={!jid}>翻译</Button>
-          <Button onClick={()=>downloadText(`${report.filename}.json`, JSON.stringify(report,null,2),'application/json')}>导出 JSON</Button>
           {onReset && <Button icon={<ReloadOutlined/>} onClick={onReset}>重新审查</Button>}
         </Space>
       }>
@@ -240,7 +236,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
 
       <TranslateModal jobId={jid} open={transOpen} onClose={()=>setTransOpen(false)} onTranslated={(lang)=>setActiveLang(lang)} />
       <Modal title={`处置风险 ${actionRisk?.rule_id||''}`} open={!!actionRisk} onCancel={()=>setActionRisk(null)} onOk={submitAction} okText="确认提交" confirmLoading={actionBusy}>
-        <Space direction="vertical" style={{width:'100%'}}><Button.Group><Button type={actionType==='adopt'?'primary':'default'} onClick={()=>setActionType('adopt')}>采纳建议</Button><Button type={actionType==='ignore'?'primary':'default'} onClick={()=>setActionType('ignore')}>忽略风险</Button><Button type={actionType==='edit'?'primary':'default'} onClick={()=>setActionType('edit')}>编辑后采纳</Button></Button.Group>{similarCases.length>0&&<Alert type="info" showIcon message={`相似已采纳案例（${similarCases.length}）`} description={<List size="small" dataSource={similarCases} renderItem={item=><List.Item><Text>{item.suggested_text || item.evidence || '历史案例'}</Text></List.Item>}/>}/>} {actionType==='edit'&&<><Select value={editedSuggestion || undefined} placeholder="选择该规则的红线改写模板" options={rules.filter(rule=>rule.id===actionRisk?.rule_id&&!!rule.template).map(rule=>({value:rule.template,label:rule.template}))} onChange={setEditedSuggestion}/><Input.TextArea value={editedSuggestion} onChange={e=>setEditedSuggestion(e.target.value)} placeholder="可在模板基础上编辑建议替换文本" rows={4}/></>}<Input.TextArea value={actionReason} onChange={e=>setActionReason(e.target.value)} placeholder="必填：说明处置依据、审批例外或业务原因" rows={4}/></Space>
+        <Space direction="vertical" style={{width:'100%'}}><Button.Group><Button type={actionType==='adopt'?'primary':'default'} onClick={()=>setActionType('adopt')}>采用修改建议</Button><Button type={actionType==='ignore'?'primary':'default'} onClick={()=>setActionType('ignore')}>确认该风险不适用</Button><Button type={actionType==='edit'?'primary':'default'} onClick={()=>setActionType('edit')}>编辑后采用</Button></Button.Group>{actionType==='ignore'&&<Alert type="warning" showIcon message="此操作不会删除系统风险记录" description="请说明该规则不适用于当前合同的事实依据；处理结果将保留在案件审计记录中。"/>}{similarCases.length>0&&<Alert type="info" showIcon message={`相似已采纳案例（${similarCases.length}）`} description={<List size="small" dataSource={similarCases} renderItem={item=><List.Item><Text>{item.suggested_text || item.evidence || '历史案例'}</Text></List.Item>}/>}/>} {actionType==='edit'&&<><Select value={editedSuggestion || undefined} placeholder="选择该规则的红线改写模板" options={rules.filter(rule=>rule.id===actionRisk?.rule_id&&!!rule.template).map(rule=>({value:rule.template,label:rule.template}))} onChange={setEditedSuggestion}/><Input.TextArea value={editedSuggestion} onChange={e=>setEditedSuggestion(e.target.value)} placeholder="可在模板基础上编辑建议替换文本" rows={4}/></>}<Input.TextArea value={actionReason} onChange={e=>setActionReason(e.target.value)} placeholder="必填：说明处置依据、审批例外或业务原因" rows={4}/></Space>
       </Modal>
       {showVersionCompare&&<Modal title="合同版本对比" open={compareOpen} onCancel={()=>setCompareOpen(false)} onOk={compareVersions} okText="开始对比">
         <Input value={baselineId} onChange={event=>setBaselineId(event.target.value)} placeholder="输入上一版本的任务 ID" />

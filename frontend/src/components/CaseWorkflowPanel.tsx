@@ -23,6 +23,7 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
   const [oaNote, setOaNote] = useState('')
   const [attachments, setAttachments] = useState<any[]>([])
   const [activeAtt, setActiveAtt] = useState<any>(null)
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   const load = async () => {
     if (!jobId) return
@@ -133,7 +134,9 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
       </List.Item>} />}
     </Card>}
 
-    <Card title="案件附件（在线切换查阅）" style={{ marginTop: 16 }}
+    <Card title="交付与高级功能" style={{ marginTop: 16 }} extra={<Button size="small" onClick={()=>setShowAdvanced(value=>!value)}>{showAdvanced?'收起高级功能':'展开高级功能'}</Button>}>
+      <Alert type="info" showIcon message="日常处理只需完成当前门禁" description="附件预览、OA 演示集成和原始交付操作已收纳在这里，不影响风险处置、补件和审批主流程。" />
+      {showAdvanced&&<><Card type="inner" title="案件附件（在线切换查阅）" style={{ marginTop: 14 }}
       extra={<Upload showUploadList={false} beforeUpload={(f)=>uploadAnnex(f as File)} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg">
         <Button size="small" icon={<PaperClipOutlined/>} loading={busy}>上传附件</Button>
       </Upload>}>
@@ -151,9 +154,9 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
         <List size="small" dataSource={activeAtt.preview||[]} locale={{emptyText:'无预览'}}
           renderItem={(c:any)=><List.Item><Text type="secondary">{c.id} · {c.source_ref||''}</Text><div style={{whiteSpace:'pre-wrap'}}>{c.text}</div></List.Item>} />
       </Card>}
-    </Card>
+      </Card>
 
-    <Card title="泛微 OA 集成（演示 Mock）" style={{ marginTop: 16 }}
+    <Card type="inner" title="泛微 OA 集成（演示 Mock）" style={{ marginTop: 14 }}
       extra={<Button type="primary" icon={<CloudUploadOutlined/>} loading={busy} onClick={pushOa} disabled={!jobId}>推送到 OA</Button>}>
       <Alert type="info" showIcon style={{marginBottom:12}}
         message="黑客松 Mock：创建流程 → 角色决策 → 批量挂载已采纳建议。生产替换为泛微流程 API。" />
@@ -173,7 +176,7 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
           <List size="small" header={`风险预览（${oaFlow.findings_preview.length}）`} dataSource={oaFlow.findings_preview}
             renderItem={(item:any)=><List.Item><Tag color="red">{item.rule_id}</Tag>{item.level} · {item.suggestion}</List.Item>} />}
       </Space>}
-    </Card>
+    </Card></>}</Card>
 
     <Modal title={`处理${approvalRoleLabel(selectedApproval?.required_role)}审批`} open={!!selectedApproval} onCancel={() => setSelectedApproval(null)} footer={<Space><Button onClick={() => setSelectedApproval(null)}>取消</Button><Button danger loading={busy} onClick={() => decide('rejected')}>驳回</Button><Button loading={busy} onClick={() => decide('changes_requested')}>要求改稿</Button><Button type="primary" loading={busy} onClick={() => decide('approved')}>批准例外</Button></Space>}>
       <Input.TextArea rows={4} value={note} onChange={event => setNote(event.target.value)} placeholder="必填：审批依据、边界或改稿要求" />

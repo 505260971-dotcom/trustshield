@@ -62,8 +62,11 @@ def main():
     assert {item['rule_id'] for item in findings} == {'CREDIT_TERM', 'CREDIT_PREPAYMENT', 'CREDIT_PAYMENT_METHOD', 'CREDIT_DELIVERY_MODE'}
     assert assess_customer_binding({'our_party': '乙方', 'parties': {'甲方': '测试客户甲有限公司'}}, '测试客户甲') == []
     assert assess_customer_binding({'our_party': '乙方', 'parties': {'甲方': '另一家客户'}}, '测试客户甲')[0]['rule_id'] == 'CREDIT_CUSTOMER_MISMATCH'
+    negated = assess_credit_compliance([{'id': 'C2', 'text': '双方采用普通送货方式，不采用 VMI、JIT、供应商管理库存或准时制交付模式。'}], credit_v1['conditions'])
+    assert 'CREDIT_DELIVERY_MODE' not in {item['rule_id'] for item in negated}, '明确禁止 VMI/JIT 不应触发信审阻断'
 
-    store.create_pending('credit-review-1', 'sample.docx', '', admin, credit_case=credit_v1)
+    contract = store.create_case_center('测试客户甲', '一般', '合同回归测试', admin, credit_v1['case_id'])
+    store.create_pending('credit-review-1', 'sample.docx', '', admin, credit_case=credit_v1, case_id=contract['case_id'])
     report = {'filename': 'sample.docx', 'summary': {'n_clauses': 1, 'n_risks': len(findings), 'high': len(findings), 'mid': 0, 'low': 0, 'overall_level': '信审阻断'},
               'contract_fields': {}, 'masked_entities': 0, 'clauses': clauses, 'steps': [], 'risks': findings}
     store.save_review('credit-review-1', report, actor=admin)

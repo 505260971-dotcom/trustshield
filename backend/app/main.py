@@ -268,6 +268,7 @@ async def credit_document_download(case_id: str, document_id: str, user=Depends(
     item = store.get_credit_document(case_id, document_id)
     if not item or not os.path.isfile(item.get('stored_path') or ''):
         raise HTTPException(404, '信审材料不存在')
+    store.audit(user, 'credit.document_download', 'credit_document', document_id, {'case_id': case_id})
     return FileResponse(item['stored_path'], filename=item['original_name'])
 
 
@@ -443,6 +444,24 @@ async def credit_reviewer_decision(case_id: str, assessment_id: str, body: dict,
 async def workbench_tasks(limit: int=100, user=Depends(current_user)):
     return {'items': store.my_work_items(user, limit)}
 
+@app.get('/api/workboxes/{bucket}')
+async def workbox(bucket: str, limit: int=200, user=Depends(current_user)):
+    try:
+        return {'items': store.list_workbox(user, bucket, limit)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+@app.get('/api/customer-workspaces')
+async def customer_workspaces(limit: int=200, user=Depends(current_user)):
+    return {'items': store.list_customer_workspaces(user, limit)}
+
+@app.get('/api/customer-workspaces/{customer_key}')
+async def customer_workspace_detail(customer_key: str, user=Depends(current_user)):
+    result = store.get_customer_workspace(customer_key, user)
+    if not result:
+        raise HTTPException(404, '客户不存在或无权查看')
+    return result
+
 @app.get('/api/case-center/cases')
 async def case_center_list(scope: str='all', limit: int=100, user=Depends(current_user)):
     if scope not in {'all', 'mine', 'inbox'}:
@@ -557,8 +576,8 @@ def _review_metadata(assignee_id: str, priority: str, due_at: str, request_note:
     if priority not in store.CASE_PRIORITIES: raise HTTPException(400, '优先级无效')
     return {'assignee_id': assignee_id, 'priority': priority, 'due_at': due, 'request_note': request_note}
 
-@app.post('/api/review')
-async def review(file: UploadFile=File(...), business_type: str=Form(''), credit_case_id: str=Form(''), parent_job_id: str=Form(''), assignee_id: str=Form(''), priority: str=Form('normal'), due_at: str=Form(''), request_note: str=Form(''), case_id: str=Form(''), document_role: str=Form('main'), user=Depends(require('review:create'))):
+@app.post('/api/case-center/cases/{case_id}/documents')
+async def case_document_review(case_id: str, file: UploadFile=File(...), business_type: str=Form(''), credit_case_id: str=Form(''), parent_job_id: str=Form(''), assignee_id: str=Form(''), priority: str=Form('normal'), due_at: str=Form(''), request_note: str=Form(''), document_role: str=Form('main'), user=Depends(require('review:create'))):
     if not secure_runtime_ready(): raise HTTPException(503,'安全运行环境未就绪：请配置 AUTH_SECRET 与 DATA_ENCRYPTION_KEY')
     try: credit_case = store.require_active_credit_case(credit_case_id)
     except ValueError as e: raise HTTPException(409, str(e))
@@ -577,22 +596,7 @@ async def review(file: UploadFile=File(...), business_type: str=Form(''), credit
     store.audit(user,'review.create','case',resolved_case_id,{'job_id':job_id,'filename':file.filename})
     return {'job_id':job_id,'case_id':resolved_case_id}
 
-@app.post('/api/review/batch')
-async def review_batch(files: list[UploadFile]=File(...), business_type: str=Form('一般'), credit_case_id: str=Form(''), assignee_id: str=Form(''), priority: str=Form('normal'), due_at: str=Form(''), request_note: str=Form(''), user=Depends(require('review:create'))):
-    if not secure_runtime_ready(): raise HTTPException(503,'安全运行环境未就绪：请配置 AUTH_SECRET 与 DATA_ENCRYPTION_KEY')
-    try: credit_case = store.require_active_credit_case(credit_case_id)
-    except ValueError as e: raise HTTPException(409, str(e))
-    jobs=[]; metadata=_review_metadata(assignee_id,priority,due_at,request_note)
-    for file in files:
-        try:
-            job_id,path=_start_review(file,user); await _write_upload(file,path); created=time.time(); catalog=store.get_rule_version(); case_id=store.create_pending(job_id,file.filename,path,user,business_type,rule_version=catalog['version'],credit_case=credit_case,**metadata)
-            JOBS[job_id]={'status':'running','steps':[],'result':None,'path':path,'filename':file.filename,'actor':user,'case_id':case_id,'business_type':business_type,'rule_version':catalog['version'],'rule_snapshot':catalog['rules'],'rules_by_id':{rule['id']:rule for rule in catalog['rules']},'credit_case':credit_case}
-            threading.Thread(target=_run,args=(path,job_id,created),daemon=True).start(); jobs.append({'job_id':job_id,'case_id':case_id,'filename':file.filename})
-        except HTTPException: continue
-    store.audit(user,'review.batch_create','review','',{'count':len(jobs)})
-    return {'jobs':jobs}
-
-@app.get('/api/jobs/{job_id}')
+@app.get('/api/reviews/{job_id}/status')
 async def job_status(job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     j=JOBS.get(job_id)
@@ -601,7 +605,7 @@ async def job_status(job_id: str, user=Depends(require('review:read'))):
     if not rec: raise HTTPException(404,'任务不存在')
     return {'status':rec['status'],'steps':[],'result':rec['report'],'case_id':rec.get('case_id')}
 
-@app.get('/api/stream/{job_id}')
+@app.get('/api/reviews/{job_id}/stream')
 async def stream(job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     j=JOBS.get(job_id)
@@ -617,24 +621,11 @@ async def stream(job_id: str, user=Depends(require('review:read'))):
             await asyncio.sleep(1)
     return StreamingResponse(gen(),media_type='text/event-stream')
 
-@app.get('/api/history')
-async def history(limit: int=50,offset: int=0,user=Depends(require('review:read'))): return {'items':store.list_history(limit,offset)}
-
-@app.get('/api/cases')
-async def cases(limit: int=100,user=Depends(require('review:read'))): return {'items':store.list_cases(user,min(max(limit,1),500))}
-
-@app.patch('/api/cases/{job_id}')
-async def case_update(job_id: str,body: dict,user=Depends(require('review:manage'))):
-    try: result=store.update_case(job_id,body,user)
-    except ValueError as e: raise HTTPException(400,str(e))
-    store.audit(user,'case.update','case',result['case_id'],{'job_id':job_id,'fields':list(body.keys())})
-    return result
-
 @app.get('/api/reviewers')
 async def reviewers(user=Depends(require('review:read'))): return {'items':store.list_reviewers()}
 
-@app.get('/api/history/{job_id}')
-async def history_detail(job_id: str,user=Depends(require('review:read'))):
+@app.get('/api/reviews/{job_id}')
+async def review_detail(job_id: str,user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     rec=store.get_review(job_id)
     if not rec: raise HTTPException(404,'not found')
@@ -644,24 +635,20 @@ async def history_detail(job_id: str,user=Depends(require('review:read'))):
     store.audit(user,'review.view','review',job_id)
     return rec
 
-@app.delete('/api/history/{job_id}')
-async def history_delete(job_id: str,user=Depends(require('admin:cases'))):
-    store.delete_review(job_id); store.audit(user,'review.delete','review',job_id); return {'ok':True}
-
 @app.get('/api/stats')
 async def dashboard_stats(user=Depends(current_user)): return store.stats(user)
 
-@app.get('/api/contracts/cases/{job_id}/findings')
+@app.get('/api/reviews/{job_id}/findings')
 async def findings(job_id: str,user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     return {'items':store.list_findings(job_id),'rule_version':'contract-v1'}
 
-@app.get('/api/contracts/cases/{job_id}/approvals')
+@app.get('/api/reviews/{job_id}/approvals')
 async def approvals(job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     return {'items': store.list_approvals(job_id, user)}
 
-@app.post('/api/contracts/cases/{job_id}/approvals/{approval_id}')
+@app.post('/api/reviews/{job_id}/approvals/{approval_id}')
 async def approval_decision(job_id: str, approval_id: str, body: dict, user=Depends(require('review:action'))):
     _assert_case_access(job_id, user)
     try:
@@ -671,12 +658,12 @@ async def approval_decision(job_id: str, approval_id: str, body: dict, user=Depe
     store.audit(user, 'review.approval_decision', 'approval', approval_id, {'job_id': job_id, 'decision': body.get('decision')})
     return result
 
-@app.get('/api/contracts/cases/{job_id}/materials')
+@app.get('/api/reviews/{job_id}/materials')
 async def material_requests(job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     return {'items': store.list_material_requests(job_id)}
 
-@app.post('/api/contracts/cases/{job_id}/materials/{request_id}/resolve')
+@app.post('/api/reviews/{job_id}/materials/{request_id}/resolve')
 async def material_resolve(job_id: str, request_id: str, body: dict, user=Depends(require('review:action'))):
     _assert_case_access(job_id, user)
     try:
@@ -686,7 +673,7 @@ async def material_resolve(job_id: str, request_id: str, body: dict, user=Depend
     store.audit(user, 'review.material_resolve', 'material', request_id, {'job_id': job_id})
     return result
 
-@app.post('/api/contracts/cases/{job_id}/materials/{request_id}/files')
+@app.post('/api/reviews/{job_id}/materials/{request_id}/files')
 async def material_upload(job_id: str, request_id: str, file: UploadFile=File(...), user=Depends(require('review:action'))):
     _assert_case_access(job_id, user)
     safe_name = os.path.basename(file.filename or 'attachment.bin')
@@ -704,7 +691,7 @@ async def material_upload(job_id: str, request_id: str, file: UploadFile=File(..
     store.audit(user, 'review.material_upload', 'material', request_id, {'job_id': job_id, 'file_id': result['file_id']})
     return result
 
-@app.get('/api/contracts/cases/{job_id}/materials/{request_id}/files/{file_id}')
+@app.get('/api/reviews/{job_id}/materials/{request_id}/files/{file_id}')
 async def material_download(job_id: str, request_id: str, file_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     item = store.get_material_file(job_id, request_id, file_id)
@@ -716,7 +703,7 @@ async def material_download(job_id: str, request_id: str, file_id: str, user=Dep
 async def clause_knowledge(rule_id: str='', limit: int=3, user=Depends(require('review:read'))):
     return {'items': store.list_knowledge(rule_id, min(max(limit, 1), 10))}
 
-@app.get('/api/contracts/cases/{job_id}/findings/{finding_id}/knowledge')
+@app.get('/api/reviews/{job_id}/findings/{finding_id}/knowledge')
 async def finding_knowledge(job_id: str, finding_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     try:
@@ -724,7 +711,7 @@ async def finding_knowledge(job_id: str, finding_id: str, user=Depends(require('
     except ValueError as e:
         raise HTTPException(404, str(e))
 
-@app.get('/api/contracts/cases/{job_id}/compare/{baseline_job_id}')
+@app.get('/api/reviews/{job_id}/compare/{baseline_job_id}')
 async def compare_contract_versions(job_id: str, baseline_job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     _assert_case_access(baseline_job_id, user)
@@ -737,14 +724,14 @@ async def compare_contract_versions(job_id: str, baseline_job_id: str, user=Depe
 async def review_batch_matrix(user=Depends(require('review:read'))):
     return {'items': store.batch_matrix(user)}
 
-@app.post('/api/contracts/cases/{job_id}/findings/{finding_id}/actions')
+@app.post('/api/reviews/{job_id}/findings/{finding_id}/actions')
 async def finding_action(job_id: str,finding_id: str,body: dict,user=Depends(require('review:action'))):
     try: result=store.record_finding_action(job_id,finding_id,body.get('action',''),body.get('reason',''),user,body.get('edited_suggestion',''))
     except ValueError as e: raise HTTPException(400,str(e))
     store.audit(user,'review.finding_action','finding',finding_id,{'job_id':job_id,'action':body.get('action')})
     return result
 
-@app.get('/api/export/{job_id}')
+@app.get('/api/reviews/{job_id}/export')
 async def export_docx_route(job_id: str, mode: str='revised', lang: str='', user=Depends(require('export'))):
     _assert_case_access(job_id, user)
     rec=store.get_review(job_id)
@@ -789,7 +776,7 @@ def _run_translate(report,mapping,tfid,target_lang,job_id,actor):
         store.save_translation(job_id, target_lang, None, 'error', actor=actor, error=str(e))
         TJOBS[tfid].update(error=str(e),status='error')
 
-@app.post('/api/translate/{job_id}')
+@app.post('/api/reviews/{job_id}/translations')
 async def translate_route(job_id: str,body: dict,user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     rec=store.get_review(job_id)
@@ -814,7 +801,7 @@ async def translate_route(job_id: str,body: dict,user=Depends(require('review:re
     threading.Thread(target=_run_translate,args=(rec['report'],mapping,tfid,target_lang,job_id,user),daemon=True).start()
     store.audit(user,'review.translate','review',job_id,{'target_lang':target_lang}); return {'tfid':tfid,'cached':False}
 
-@app.get('/api/translate/{job_id}')
+@app.get('/api/reviews/{job_id}/translations')
 async def translate_get(job_id: str, lang: str='en', user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     if lang not in ('en','vi','ja','es'):
@@ -824,12 +811,12 @@ async def translate_get(job_id: str, lang: str='en', user=Depends(require('revie
         raise HTTPException(404,'尚无该语言的翻译结果')
     return saved
 
-@app.get('/api/translate/{job_id}/list')
+@app.get('/api/reviews/{job_id}/translations/list')
 async def translate_list(job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     return {'items': store.list_translations(job_id)}
 
-@app.get('/api/translate/stream/{tfid}')
+@app.get('/api/reviews/translations/stream/{tfid}')
 async def translate_stream(tfid: str,user=Depends(require('review:read'))):
     j=TJOBS.get(tfid)
     if not j: raise HTTPException(404,'not found')
@@ -843,7 +830,7 @@ async def translate_stream(tfid: str,user=Depends(require('review:read'))):
             await asyncio.sleep(1)
     return StreamingResponse(gen(),media_type='text/event-stream')
 
-@app.post('/api/cases/{job_id}/attachments')
+@app.post('/api/reviews/{job_id}/attachments')
 async def case_attachment_upload(job_id: str, file: UploadFile=File(...), role: str=Form('annex'), user=Depends(require('review:action'))):
     _assert_case_access(job_id, user)
     ext=os.path.splitext(file.filename or '')[1].lower()
@@ -862,12 +849,12 @@ async def case_attachment_upload(job_id: str, file: UploadFile=File(...), role: 
     store.audit(user,'case.attachment_upload','review',job_id,{'file_id':item['file_id'],'filename':file.filename})
     return item
 
-@app.get('/api/cases/{job_id}/attachments')
+@app.get('/api/reviews/{job_id}/attachments')
 async def case_attachment_list(job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     return {'items': store.list_case_attachments(job_id)}
 
-@app.get('/api/cases/{job_id}/attachments/{file_id}')
+@app.get('/api/reviews/{job_id}/attachments/{file_id}')
 async def case_attachment_get(job_id: str, file_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     item=store.get_case_attachment(job_id, file_id)
@@ -876,7 +863,7 @@ async def case_attachment_get(job_id: str, file_id: str, user=Depends(require('r
     safe={k:v for k,v in item.items() if k != 'stored_path'}
     return safe
 
-@app.get('/api/cases/{job_id}/attachments/{file_id}/download')
+@app.get('/api/reviews/{job_id}/attachments/{file_id}/download')
 async def case_attachment_download(job_id: str, file_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     item=store.get_case_attachment(job_id, file_id)
@@ -974,5 +961,9 @@ _FRONT_DIST=os.path.normpath(os.path.join(os.path.dirname(__file__),'..','..','f
 if os.path.isdir(_FRONT_DIST):
     assets=os.path.join(_FRONT_DIST,'assets')
     if os.path.isdir(assets): app.mount('/assets',StaticFiles(directory=assets),name='assets')
+    @app.api_route('/api/{path:path}', methods=['GET','POST','PUT','PATCH','DELETE'])
+    async def _unknown_api(path: str):
+        """Never let retired API paths fall through to the SPA index page."""
+        raise HTTPException(404, f'未定义的 API 接口：/api/{path}')
     @app.get('/{full_path:path}')
     async def _spa(full_path: str): return FileResponse(os.path.join(_FRONT_DIST,'index.html'))

@@ -72,7 +72,20 @@ export default function AdminPage(){
   const saveRoute=async()=>{try{if(!route)return;const config=await routeForm.validateFields();await api.updateCreditRoute(route.version,config);message.success('信审批核路由草稿已保存');await loadRoute(route.version)}catch(e:any){if(e?.errorFields)return;message.error(e.message||'保存信审批核路由失败')}}
   const publishRoute=async()=>{try{if(!route)return;await api.publishCreditRouteVersion(route.version);message.success('信审批核路由已发布，新报送的信审将按此版本路由');await load()}catch(e:any){message.error(e.message||'发布信审批核路由失败')}}
 
-  return <>
+  const activeMembers=users.filter(member=>member.active).length
+  const draftCount=versions.filter(version=>version.status==='draft').length+(route?.status==='draft'?1:0)
+  return <div className="role-page governance-page">
+    <section className="page-hero page-hero-light governance-hero">
+      <div><span className="section-kicker">GOVERNANCE CONTROL</span><Typography.Title level={2}>组织与规则</Typography.Title><Typography.Paragraph>统一维护成员权限、合同底线与信审批核路径。规则和路由均通过“草稿—发布”生效，已进入流程的案件会保留当时使用的版本。</Typography.Paragraph></div>
+      <div className="page-hero-actions"><Tag color="purple">仅最终审批人可维护</Tag><Tag color="green">审计全程留痕</Tag></div>
+    </section>
+    <section className="compact-metrics" aria-label="治理概览">
+      <div className="compact-metric"><span className="compact-metric-icon"><TeamOutlined/></span><div><small>启用成员</small><strong>{activeMembers}</strong><em>共 {users.length} 个账户</em></div></div>
+      <div className="compact-metric metric-attention"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>规则版本</small><strong>{versions.length}</strong><em>{selected?.status==='draft'?'当前正在编辑草稿':'当前查看已发布版本'}</em></div></div>
+      <div className="compact-metric metric-warning"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>待发布草稿</small><strong>{draftCount}</strong><em>发布前请完成复核</em></div></div>
+      <div className="compact-metric"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>审计记录</small><strong>{audit.length}</strong><em>当前加载的操作日志</em></div></div>
+    </section>
+    <div className="governance-stack">
     <Card className="member-admin-card" title={<Space><TeamOutlined/>团队成员与分级审批权限</Space>} extra={<Button type="primary" icon={<PlusOutlined/>} onClick={openCreateUser}>新增成员</Button>}>
       <Alert showIcon type="info" style={{marginBottom:16}} message="成员账户管理" description="管理员可新增、编辑、重置密码、停用或永久删除账户。永久删除不可恢复；系统会阻止删除当前登录账户或最后一名启用的最终审批人。"/>
       <Table rowKey="id" dataSource={users} pagination={{pageSize:8}} scroll={{x:900}} columns={[
@@ -84,7 +97,7 @@ export default function AdminPage(){
       ]}/>
     </Card>
 
-    <Card style={{marginTop:16}} title="合同底线规则版本" extra={<Space><Button onClick={createDraft} icon={<PlusOutlined/>}>从已发布版本创建草稿</Button>{editable&&<Popconfirm title={'发布 '+selectedVersion+' 后将替换当前生效版本，确认吗？'} onConfirm={publish}><Button type="primary">发布草稿</Button></Popconfirm>}</Space>}>
+    <Card className="governance-card" title="合同底线规则版本" extra={<Space><Button onClick={createDraft} icon={<PlusOutlined/>}>从已发布版本创建草稿</Button>{editable&&<Popconfirm title={'发布 '+selectedVersion+' 后将替换当前生效版本，确认吗？'} onConfirm={publish}><Button type="primary">发布草稿</Button></Popconfirm>}</Space>}>
       <Space style={{marginBottom:12}} wrap><Text type="secondary">当前查看：</Text><Select value={selectedVersion||undefined} style={{minWidth:220}} onChange={loadRules} options={versions.map(version=>({value:version.version,label:version.version+' · '+version.status}))}/>{selected&&<Tag color={selected.status==='published'?'green':selected.status==='draft'?'orange':'default'}>{selected.status}</Tag>}</Space>
       <Table rowKey="id" dataSource={rules} size="small" pagination={{pageSize:8}} scroll={{x:900}} columns={[
         {title:'规则',dataIndex:'id',width:72,render:(value:string,rule:RuleItem)=><Tag color={rule.severity==='high'?'red':'orange'}>{value}</Tag>},
@@ -94,13 +107,13 @@ export default function AdminPage(){
       ]}/>
     </Card>
 
-    <Card style={{marginTop:16}} title="信审批核路由" extra={<Space><Button onClick={createRouteDraft} icon={<PlusOutlined/>}>从已发布版本创建草稿</Button>{route?.status==='draft'&&<><Button onClick={saveRoute}>保存草稿</Button><Popconfirm title={'发布 '+route.version+' 后将替换当前生效信审批核路由，确认吗？'} onConfirm={publishRoute}><Button type="primary">发布草稿</Button></Popconfirm></>}</Space>}>
+    <Card className="governance-card" title="信审批核路由" extra={<Space><Button onClick={createRouteDraft} icon={<PlusOutlined/>}>从已发布版本创建草稿</Button>{route?.status==='draft'&&<><Button onClick={saveRoute}>保存草稿</Button><Popconfirm title={'发布 '+route.version+' 后将替换当前生效信审批核路由，确认吗？'} onConfirm={publishRoute}><Button type="primary">发布草稿</Button></Popconfirm></>}</Space>}>
       <Alert showIcon type="info" style={{marginBottom:16}} message="统一审批路径治理" description="每份信审先进入财务审批主管复核；只有命中额度、账期、预付款、承兑汇票、VMI/JIT 或人工修订等上报条件时，才进入集团财务总监最终审批。已报送案件会固化当时的路由版本，不受后续发布影响。"/>
       <Space style={{marginBottom:12}} wrap><Text type="secondary">当前查看：</Text><Select value={selectedRouteVersion||undefined} style={{minWidth:240}} onChange={loadRoute} options={routeVersions.map(version=>({value:version.version,label:version.version+' · '+version.status}))}/>{route&&<Tag color={route.status==='published'?'green':route.status==='draft'?'orange':'default'}>{route.status}</Tag>}</Space>
       {route&&<Form form={routeForm} layout="vertical" disabled={route.status!=='draft'}><Space wrap align="start"><Form.Item name="final_threshold_amount" label="上报最终审批：额度不低于" rules={[{required:true}]}><InputNumber min={0} precision={2} addonAfter="CNY"/></Form.Item><Form.Item name="final_threshold_payment_days" label="上报最终审批：账期不低于" rules={[{required:true}]}><InputNumber min={0} addonAfter="天"/></Form.Item><Form.Item name="final_threshold_prepayment_ratio" label="上报最终审批：最低预付款不高于" rules={[{required:true}]}><InputNumber min={0} max={100} addonAfter="%"/></Form.Item></Space><Space wrap><Form.Item name="final_on_manual_override" label="人工修订 / 兜底报送" valuePropName="checked"><Switch checkedChildren="上报终审" unCheckedChildren="主管结案"/></Form.Item><Form.Item name="final_on_acceptance_bill" label="包含承兑汇票" valuePropName="checked"><Switch checkedChildren="上报终审" unCheckedChildren="主管结案"/></Form.Item><Form.Item name="final_on_vmi_jit" label="允许 VMI/JIT" valuePropName="checked"><Switch checkedChildren="上报终审" unCheckedChildren="主管结案"/></Form.Item></Space><Form.Item name="director_required" hidden valuePropName="checked"><Switch/></Form.Item></Form>}
     </Card>
 
-    <Card style={{marginTop:16}} title={<Space><AuditOutlined/>合同评审审计日志</Space>}>
+    <Card className="governance-card" title={<Space><AuditOutlined/>合同评审审计日志</Space>}>
       <Table size="small" rowKey="event_id" dataSource={audit} pagination={{pageSize:8}} scroll={{x:900}} columns={[
         {title:'时间',dataIndex:'created_at',render:fmtTime},{title:'动作',dataIndex:'action'},
         {title:'资源',render:(_:unknown,row:any)=>(row.resource_type||'—')+' / '+(row.resource_id||'—')},
@@ -108,6 +121,7 @@ export default function AdminPage(){
       ]}/>
     </Card>
 
+    </div>
     <Drawer title={editingUser?'编辑成员':'新增合同评审成员'} open={userOpen} onClose={closeUser} width={460} extra={<Button type="primary" onClick={()=>userForm.submit()}>{editingUser?'保存修改':'创建成员'}</Button>}>
       <Alert showIcon type="info" style={{marginBottom:16}} message={editingUser?'可修改姓名、岗位、启用状态和登录密码。':'创建后，成员可以按所选岗位看到对应的工作台。'}/>
       <Form form={userForm} layout="vertical" onFinish={saveUser} initialValues={{role:'reviewer',active:true}}>
@@ -122,5 +136,5 @@ export default function AdminPage(){
     <Modal title={'编辑 '+(editing?.id||'')+' 草稿规则'} open={ruleOpen} onCancel={()=>setRuleOpen(false)} onOk={saveRule} okText="保存草稿">
       <Form form={ruleForm} layout="vertical"><Form.Item name="baseline" label="底线规则" rules={[{required:true}]}><Input.TextArea rows={2}/></Form.Item><Form.Item name="check" label="裁决说明" rules={[{required:true}]}><Input.TextArea rows={2}/></Form.Item><Form.Item name="severity" label="风险等级" rules={[{required:true}]}><Select options={['high','mid','low'].map(value=>({value,label:value}))}/></Form.Item><Form.Item name="applies_to" label="适用业务类型" rules={[{required:true}]}><Select mode="multiple" options={businessTypes.map(value=>({value,label:value}))}/></Form.Item><Form.Item name="approval_role" label="例外审批层级"><Select allowClear options={[{value:'director',label:'财务审批主管'},{value:'admin',label:'集团财务总监 / 最终审批人'}]}/></Form.Item><Form.Item name="template" label="红线改写模板" rules={[{required:true}]}><Input.TextArea rows={3}/></Form.Item></Form>
     </Modal>
-  </>
+  </div>
 }

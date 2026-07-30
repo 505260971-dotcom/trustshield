@@ -34,7 +34,8 @@ store.submit_credit_case(credit['case_id'], reviewer)
 credit = store.decide_credit_case(credit['case_id'], 'approved', '主管复核', director)
 assert credit['status'] == 'pending_final'
 credit = store.decide_credit_case(credit['case_id'], 'approved', '最终批核', admin)
-store.create_pending('review-1','sample.docx','',admin, credit_case=credit)
+contract = store.create_case_center('测试客户', '一般', '安全工作流合同测试', admin, credit['case_id'])
+store.create_pending('review-1','sample.docx','',admin, credit_case=credit, case_id=contract['case_id'])
 report={'filename':'sample.docx','summary':{'n_clauses':1,'n_risks':1,'high':1,'mid':0,'low':0,'overall_level':'阻断'},
         'contract_fields':{},'masked_entities':1,'clauses':[],'steps':[],
         'risks':[{'clause_id':'C1','page':1,'rule_id':'R04','rule_baseline':'no joint liability','severity':'high','level':'阻断','evidence':'e','numeric_note':'','suggestion':'s','decision_source':'test'}]}
