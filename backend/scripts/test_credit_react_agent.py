@@ -40,6 +40,20 @@ def main():
     assert react._claim_kind({'entity_name': '测试客户'}) == 'identity'
     assert react._claim_kind({'period': '2025年度', 'scope': '合并口径', 'currency': '人民币', 'source_unit': '元'}) == 'financial_context'
     assert react._claim_kind({'metric': '营业收入', 'value': 1}) == 'financial_metric'
+    split_header_chunks = {
+        'DOC:H1': {'text': '测试客户 2025年度合并财务报表', 'document_id': 'DOC', 'source_ref': '第1页 · 页眉', 'page': 1},
+        'DOC:H2': {'text': '财务数据币种：CNY；金额单位：人民币元', 'document_id': 'DOC', 'source_ref': '第1页 · 口径', 'page': 1},
+        'DOC:H3': {'text': '财务数据币种：CNY；金额单位：人民币元', 'document_id': 'DOC', 'source_ref': '第2页 · 口径', 'page': 2},
+    }
+    split_context = {'claim_id': 'split_ctx', 'type': 'financial_context', 'entity_name': '测试客户', 'period': '2025年度',
+                     'scope': 'consolidated', 'currency': 'CNY', 'source_unit': 'base',
+                     'evidence_refs': [{'evidence_id': 'DOC:H1', 'evidence_quote': '测试客户 2025年度合并财务报表'},
+                                       {'evidence_id': 'DOC:H2', 'evidence_quote': '财务数据币种：CNY；金额单位：人民币元'}]}
+    valid, rejected, _ = react._validate_claims([split_context], split_header_chunks, {'customer_name': '测试客户'}, {})
+    assert len(valid) == 1 and not rejected and len(valid[0]['evidence_refs']) == 2
+    split_context['evidence_refs'][1]['evidence_id'] = 'DOC:H3'
+    _, rejected, _ = react._validate_claims([split_context], split_header_chunks, {'customer_name': '测试客户'}, {})
+    assert rejected and '同一文档同一页' in rejected[0]['reason']
     document = {'document_id': 'DOC', 'document_type': 'financial_report', 'original_name': 'unknown-format.pdf'}
     old = react.configured_financial_llm, react.get_financial_llm, react.invoke_remote, react.rerank_required
     try:
@@ -83,6 +97,23 @@ def main():
         assert failed['status'] == 'execution_failed' and not failed['facts']
     finally:
         react.configured_financial_llm = old
+
+    # A transient provider timeout gets exactly one retry; no local fact path is used.
+    old = react.get_financial_llm, react.invoke_remote, react.time.sleep
+    try:
+        calls = []
+        react.get_financial_llm = lambda **_: object()
+        react.time.sleep = lambda _: None
+        def retry_once(_llm, _messages, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise TimeoutError('simulated timeout')
+            return _Response('{"action":"finish"}')
+        react.invoke_remote = retry_once
+        _, retry_count = react._invoke_agent_with_one_retry([])
+        assert retry_count == 1 and len(calls) == 2
+    finally:
+        react.get_financial_llm, react.invoke_remote, react.time.sleep = old
     print('production ReAct audit fails closed and accepts only verified Claims')
 
 

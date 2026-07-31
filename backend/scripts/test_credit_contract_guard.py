@@ -67,6 +67,12 @@ def main():
 
     contract = store.create_case_center('测试客户甲', '一般', '合同回归测试', admin, credit_v1['case_id'])
     store.create_pending('credit-review-1', 'sample.docx', '', admin, credit_case=credit_v1, case_id=contract['case_id'])
+    # A durable but unbound draft can be safely recovered at upload time only
+    # with an approved credit case for the very same customer.
+    recovered = store.create_case_center('测试客户甲', '一般', '上传重试回归测试', admin)
+    rebound = store.bind_case_center_credit(recovered['case_id'], credit_v1['case_id'], admin)
+    assert rebound['case_id'] == credit_v1['case_id']
+    assert store.get_case_center(recovered['case_id'], admin)['credit_case_id'] == credit_v1['case_id']
     report = {'filename': 'sample.docx', 'summary': {'n_clauses': 1, 'n_risks': len(findings), 'high': len(findings), 'mid': 0, 'low': 0, 'overall_level': '信审阻断'},
               'contract_fields': {}, 'masked_entities': 0, 'clauses': clauses, 'steps': [], 'risks': findings}
     store.save_review('credit-review-1', report, actor=admin)

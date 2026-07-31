@@ -1171,6 +1171,45 @@ def create_case_center(customer_name: str, business_type: str, request_note: str
             _task(c, case_id, 'document_required', '上传合同文件包', '请上传主合同、订单或补充协议。', actor.get('id'), actor, due_at)
     return get_case_center(case_id, actor)
 
+
+def bind_case_center_credit(case_id: str, credit_case_id: str, actor: dict) -> dict:
+    """Bind an unsubmitted contract case to its approved credit version.
+
+    A case is created before files are uploaded.  Keeping the binding on the
+    durable case lets a retry safely recover from a transient client upload
+    failure without trusting a later document request to change an existing
+    binding.
+    """
+    init_db()
+    requested_id = (credit_case_id or '').strip()
+    if not requested_id:
+        raise ValueError('合同案件尚未绑定已生效的信审版本')
+    credit = require_active_credit_case(requested_id)
+    with _lock, _conn() as c:
+        row = c.execute('SELECT * FROM contract_cases WHERE case_id=?', (case_id,)).fetchone()
+        if not row:
+            raise ValueError('合同案件不存在')
+        item = dict(row)
+        if actor.get('role') == 'business' and item.get('created_by') != actor.get('id'):
+            raise ValueError('无权操作该合同案件')
+        if (item.get('customer_name') or '').strip() != (credit.get('customer_name') or '').strip():
+            raise ValueError('信审版本客户与合同案件客户不一致')
+        existing_id = (item.get('credit_case_id') or '').strip()
+        if existing_id and existing_id != requested_id:
+            raise ValueError('合同案件已绑定其他信审版本，不能在上传时替换')
+        if not existing_id:
+            now = time.time()
+            c.execute("UPDATE contract_cases SET credit_case_id=?,status='draft',current_stage='draft',updated_at=? WHERE case_id=?",
+                      (requested_id, now, case_id))
+            c.execute("UPDATE workflow_tasks SET status='completed',completed_by=?,completed_at=? WHERE case_id=? AND task_type='credit_required' AND status='open'",
+                      (actor.get('id'), now, case_id))
+            open_document = c.execute("SELECT 1 FROM workflow_tasks WHERE case_id=? AND task_type='document_required' AND status='open'", (case_id,)).fetchone()
+            if not open_document:
+                _task(c, case_id, 'document_required', '上传合同文件包', '已绑定生效信审版本，请上传主合同、订单或补充协议。', actor.get('id'), actor, item.get('due_at'))
+            _case_event(c, case_id, 'case.credit_bound', f'已绑定信审版本 V{credit["version"]}', actor,
+                        {'credit_case_id': requested_id, 'credit_version': credit['version']})
+    return credit
+
 def _case_access_clause(actor: dict, alias: str='c') -> tuple[str, list[Any]]:
     if actor.get('role') == 'business':
         return f' AND {alias}.created_by=?', [actor.get('id')]

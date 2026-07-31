@@ -76,16 +76,20 @@ export default function CaseDetailPage({caseId,onBack}:{caseId:string;onBack:()=
     ? '当前版本存在信审边界阻断。请先确认合同文本是否真的超出已生效信审；信审阻断不能通过合同端审批或忽略。'
     : item.current_stage==='ai_review'
       ? '系统正在解析合同、校验底线条款与已绑定的信审边界。审查完成后会自动交给信用审核专员。'
-      : item.current_stage==='awaiting_business'
+    : item.current_stage==='awaiting_business'
         ? '请根据退回意见上传修订合同或补充附件；上传后系统会重新审查当前版本。'
+        : item.current_stage==='draft'&&item.credit_case_id
+          ? '已绑定生效信审版本，请上传主合同以启动系统审查。'
+          : item.current_stage==='awaiting_credit'
+            ? '该案件尚未绑定已生效信审版本，暂不能上传合同。'
         : canReviewer&&item.current_stage==='legal_review'
           ? '请先处理下方的风险处置、补件和例外审批门禁，再决定是否可签约或提交主管审批。'
           : item.current_stage==='legal_review'
             ? `当前由信用审核专员处理。你以${roleLabel(user?.role)}登录，可查看进度${canBusiness?'并上传修订文件':''}。`
             : `当前等待${item.current_stage==='approval'?'财务审批主管':item.current_stage==='final_approval'?'集团财务总监 / 最终审批人':'相关责任人'}处理。`
 
-  const primaryAction = canBusiness && item.current_stage === 'awaiting_business'
-    ? <Upload showUploadList={false} beforeUpload={file => uploadRevision(file as File)} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.bmp"><Button type="primary" icon={<UploadOutlined/>}>上传修订合同</Button></Upload>
+  const primaryAction = canBusiness && ['draft','awaiting_business'].includes(item.current_stage) && item.credit_case_id
+    ? <Upload showUploadList={false} beforeUpload={file => uploadRevision(file as File)} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.bmp"><Button type="primary" icon={<UploadOutlined/>}>{item.documents.length?'上传修订合同':'上传主合同'}</Button></Upload>
     : canReviewer && item.current_stage === 'legal_review'
       ? gateCount ? <Button type="primary" onClick={() => openReport(activeJob)}>处理风险与门禁（{gateCount}）</Button> : <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('ready_for_signing','信用审核专员复核完成，可进入签约交付。')}>确认可签约</Button>
       : canDirector && item.current_stage === 'approval'
@@ -102,7 +106,7 @@ export default function CaseDetailPage({caseId,onBack}:{caseId:string;onBack:()=
     {canReviewer && item.current_stage === 'legal_review' && <Button loading={actionBusy} icon={<SendOutlined/>} onClick={() => act('submit_approval','合同风险需要分级审批。')}>提交主管审批</Button>}
     {canDirector && item.current_stage === 'approval' && <><Button loading={actionBusy} onClick={() => act('return_to_reviewer','请根据主管意见修改审查结论。')}>退回审核员</Button><Button loading={actionBusy} onClick={() => act('return_to_business','请补充材料或上传修订合同。')}>退回业务补件</Button><Button loading={actionBusy} onClick={() => act('escalate_final','主管复核后上报集团财务总监最终审批。')}>上报最终审批</Button></>}
     {canFinal && ['approval','final_approval'].includes(item.current_stage) && <><Button loading={actionBusy} onClick={() => act('return_to_reviewer','请根据审批意见修改审查结论。')}>退回审核员</Button><Button loading={actionBusy} onClick={() => act('return_to_business','请补充材料或上传修订合同。')}>退回业务补件</Button></>}
-    {canBusiness && item.current_stage !== 'archived' && item.current_stage !== 'cancelled' && item.current_stage !== 'awaiting_business' && <Upload showUploadList={false} beforeUpload={file => uploadRevision(file as File)} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.bmp"><Button icon={<UploadOutlined/>}>上传修订合同</Button></Upload>}
+    {canBusiness && item.credit_case_id && item.documents.length>0 && item.current_stage !== 'archived' && item.current_stage !== 'cancelled' && item.current_stage !== 'awaiting_business' && <Upload showUploadList={false} beforeUpload={file => uploadRevision(file as File)} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.bmp"><Button icon={<UploadOutlined/>}>上传修订合同</Button></Upload>}
   </Space>
 
   const documentTab=<>
@@ -130,6 +134,12 @@ export default function CaseDetailPage({caseId,onBack}:{caseId:string;onBack:()=
 
   return <div className="case-detail-page">
     <div className="page-intro case-detail-intro"><div><Button type="link" icon={<ArrowLeftOutlined/>} onClick={onBack} style={{paddingLeft:0}}>返回合同案件</Button><Title level={3}>{item.customer_name} · 合同审查案件</Title><Text type="secondary">{item.case_id}　{item.request_note||'未填写申请说明'}</Text></div></div>
+    <section className="case-context-strip" aria-label="案件处理摘要">
+      <div><span>当前处理</span><strong>{stageLabel[item.current_stage]||item.current_stage}</strong><Text type="secondary">{roleLabel(item.responsible_role)} · {item.responsible_name||'系统分派中'}</Text></div>
+      <div><span>当前版本</span><strong>{currentDocument?.version_label||'待上传'}</strong><Text type="secondary">{currentDocument?.original_name||'尚未上传主合同'}</Text></div>
+      <div><span>通关状态</span><strong className={gateCount?'is-warning':'is-success'}>{gateCount?`待处理 ${gateCount} 项`:'门禁已完成'}</strong><Text type="secondary">{creditBlockers.length?'存在信审边界阻断':pendingFindings?'仍有风险待处置':pendingMaterials.length?'仍有材料待补齐':'可继续按流程推进'}</Text></div>
+      <div><span>信审边界</span><strong>{item.credit_case_id?'已绑定':'未绑定'}</strong><Text type="secondary">{item.credit_case_id?'合同不得超出已生效条件':'需先完成客户信审'}</Text></div>
+    </section>
     <Card className="case-next-action-card" title="当前最需要推进什么？"><div className="case-next-action"><div><Text type="secondary">当前卡点</Text><Title level={4}>{stageLabel[item.current_stage]||item.current_stage} · {item.responsible_name||roleLabel(item.responsible_role)}</Title><Text>{actionHint}</Text><div className="case-next-action-meta"><span>当前责任：{roleLabel(item.responsible_role)} · {item.responsible_name||'系统分派中'}</span><span>{gateCount?`尚有 ${gateCount} 项门禁待完成`:'当前版本门禁已完成'}</span></div></div><div className="case-next-action-buttons">{primaryAction}{secondaryActions}</div></div></Card>
 
     <Card className="case-stage-card"><Steps current={stageIndex} items={stageOrder.map(key=>({title:stageLabel[key]}))}/><Descriptions size="small" column={{xs:1,md:3}} style={{marginTop:20}}><Descriptions.Item label="当前阶段"><Tag color={item.current_stage==='ready_to_sign'?'green':item.current_stage==='awaiting_business'?'orange':'blue'}>{stageLabel[item.current_stage]||item.current_stage}</Tag></Descriptions.Item><Descriptions.Item label="当前责任"><Text strong>{roleLabel(item.responsible_role)} · {item.responsible_name||'系统自动分派中'}</Text></Descriptions.Item><Descriptions.Item label="已绑定信审版本">{item.credit_case_id?<Space><SafetyCertificateOutlined/>已绑定且作为审查边界</Space>:'未绑定'}</Descriptions.Item></Descriptions><Alert className="case-handoff-alert" showIcon type="info" message={`当前登录：${roleLabel(user?.role)}。${actionHint}`}/></Card>

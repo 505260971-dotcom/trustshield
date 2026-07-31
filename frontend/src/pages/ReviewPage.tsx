@@ -15,19 +15,31 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
   const [attachments, setAttachments] = useState<File[]>([])
   const [credits, setCredits] = useState<CreditCase[]>([])
   const [customers, setCustomers] = useState<CustomerWorkspace[]>([])
+  const [customerName, setCustomerName] = useState('')
+  const [creditCaseId, setCreditCaseId] = useState('')
+  const [createdCaseId, setCreatedCaseId] = useState('')
   const [creditWarning, setCreditWarning] = useState(false)
   const [busy, setBusy] = useState(false)
   const selectedCreditId = Form.useWatch('credit_case_id', form)
 
-  const loadCredits = async (customerName?: string) => {
-    const customer = String(customerName ?? form.getFieldValue('customer_name') ?? '').trim()
+  const loadCredits = async (providedCustomerName?: string) => {
+    const customer = [providedCustomerName, form.getFieldValue('customer_name'), customerName].map(value => String(value || '').trim()).find(Boolean) || ''
     if (!customer) return message.info('请先选择或填写客户名称')
     try {
       const result = await api.creditDecisions(customer)
-      setCredits(result.items)
-      setCreditWarning(!result.items.length)
-      if (result.items.length === 1) form.setFieldValue('credit_case_id', result.items[0].case_id)
-      if (!result.items.length) form.setFieldValue('credit_case_id', undefined)
+      const available = [...(result.items || [])].sort((a, b) => b.version - a.version)
+      const selected = String(form.getFieldValue('credit_case_id') || '').trim()
+      setCredits(available)
+      setCreditWarning(!available.length)
+      // 业务人员无需先理解版本策略：默认采用最新的已生效版本，仍可在下一步显式切换确认。
+      if (available.length && !available.some(item => item.case_id === selected)) {
+        form.setFieldValue('credit_case_id', available[0].case_id)
+        setCreditCaseId(available[0].case_id)
+      }
+      if (!available.length) {
+        form.setFieldValue('credit_case_id', undefined)
+        setCreditCaseId('')
+      }
     } catch (error: any) { message.error(error?.message || '加载客户信审失败') }
   }
 
@@ -36,12 +48,14 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
     if (!initialCustomerKey) return
     api.customerWorkspace(initialCustomerKey).then(async customer => {
       form.setFieldValue('customer_name', customer.customer_name)
+      setCustomerName(customer.customer_name)
       await loadCredits(customer.customer_name)
     }).catch(error => message.error(error?.message || '未能载入客户信息'))
   }, [initialCustomerKey])
 
   const selectCustomer = async (customerName: string) => {
     form.setFieldValue('customer_name', customerName)
+    setCustomerName(customerName)
     await loadCredits(customerName)
   }
   const addAttachment = (file: File) => {
@@ -52,44 +66,67 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
     try {
       if (step === 0) {
         const value = await form.validateFields(['customer_name'])
-        await loadCredits(value.customer_name)
+        const customer = String(value.customer_name || customerName).trim()
+        setCustomerName(customer)
+        await loadCredits(customer)
       }
       if (step === 1) await form.validateFields(['credit_case_id', 'business_type', 'priority'])
+      if (step === 1) setCreditCaseId(String(form.getFieldValue('credit_case_id') || creditCaseId).trim())
       setStep(current => Math.min(2, current + 1))
     } catch { /* Ant Design already displays field guidance */ }
   }
   const submit = async () => {
     try {
       const value = await form.validateFields()
+      const customer = String(value.customer_name || form.getFieldValue('customer_name') || customerName).trim()
+      if (!customer) {
+        setStep(0)
+        form.setFields([{ name: 'customer_name', errors: ['请填写客户名称'] }])
+        return
+      }
+      const boundCreditCaseId = String(value.credit_case_id || form.getFieldValue('credit_case_id') || creditCaseId || (credits.length === 1 ? credits[0].case_id : '')).trim()
+      if (!boundCreditCaseId) {
+        setStep(1)
+        form.setFields([{ name: 'credit_case_id', errors: ['请选择已生效信审版本'] }])
+        return
+      }
       if (!mainFile) return message.warning('请上传一份主合同后再提交')
       setBusy(true)
-      const root = await api.createCaseCenter({ customer_name: value.customer_name, business_type: value.business_type, credit_case_id: value.credit_case_id, priority: value.priority, due_at: value.due_at?.valueOf() / 1000, request_note: value.request_note })
-      await api.upload(mainFile, { case_id: root.case_id, credit_case_id: value.credit_case_id, business_type: value.business_type, document_role: 'main' })
-      for (const file of attachments) await api.upload(file, { case_id: root.case_id, credit_case_id: value.credit_case_id, business_type: value.business_type, document_role: 'annex' })
+      const root = createdCaseId ? { case_id: createdCaseId, credit_case_id: boundCreditCaseId } : await api.createCaseCenter({ customer_name: customer, business_type: value.business_type, credit_case_id: boundCreditCaseId, priority: value.priority, due_at: value.due_at?.valueOf() / 1000, request_note: value.request_note })
+      setCreatedCaseId(root.case_id)
+      const uploadCreditCaseId = String(root.credit_case_id || boundCreditCaseId).trim()
+      await api.upload(mainFile, { case_id: root.case_id, credit_case_id: uploadCreditCaseId, business_type: value.business_type, document_role: 'main' })
+      for (const file of attachments) await api.upload(file, { case_id: root.case_id, credit_case_id: uploadCreditCaseId, business_type: value.business_type, document_role: 'annex' })
       message.success(`案件已创建，主合同和 ${attachments.length} 份关联材料正在进入系统审查`)
       onCreated(root.case_id)
     } catch (error: any) { if (!error?.errorFields) message.error(error?.message || '提交失败') } finally { setBusy(false) }
   }
   const customerOptions = useMemo(() => customers.map(customer => ({ value: customer.customer_name, label: <Space><span>{customer.customer_name}</span>{customer.latest_credit?.status === 'approved' ? <span className="customer-option-status">有效信审 V{customer.latest_credit.version}</span> : <span className="customer-option-status is-warning">暂无有效信审</span>}</Space> })), [customers])
   const selectedCredit = credits.find(item => item.case_id === selectedCreditId)
+  const creditLinkCopy = credits.length === 1
+    ? `系统已自动关联唯一可用的信审版本 V${credits[0].version}`
+    : credits.length > 1 && selectedCredit
+      ? `系统已推荐最新生效版本 V${selectedCredit.version}；你可在下一步确认或切换版本`
+      : ''
 
   return <div className="review-request-page">
     <Card title={<Space><FileAddOutlined />发起合同审查</Space>} extra={step === 2 ? <Button type="primary" loading={busy} onClick={submit}>创建案件并提交审查</Button> : null}>
       <Steps className="review-request-steps" current={step} responsive items={[{ title: '选择客户' }, { title: '确认信审' }, { title: '上传合同' }]} />
-      <Form form={form} layout="vertical" initialValues={{ business_type: '一般', priority: 'normal' }} className="review-request-form">
+      <Form form={form} layout="vertical" preserve initialValues={{ business_type: '一般', priority: 'normal' }} className="review-request-form" onValuesChange={changed => { if (Object.prototype.hasOwnProperty.call(changed, 'customer_name')) setCustomerName(String(changed.customer_name || '').trim()); if (Object.prototype.hasOwnProperty.call(changed, 'credit_case_id')) setCreditCaseId(String(changed.credit_case_id || '').trim()) }}>
         {step === 0 && <section className="request-step-panel">
           <Typography.Title level={4}>客户</Typography.Title>
           <Form.Item name="customer_name" label="客户名称" rules={[{ required: true, message: '请选择或填写客户名称' }]}>
             <AutoComplete options={customerOptions} placeholder="搜索已有客户，或输入新客户名称" filterOption={(input, option) => String(option?.value || '').toLowerCase().includes(input.toLowerCase())} onSelect={selectCustomer} onBlur={() => loadCredits()} />
           </Form.Item>
+          {!!creditLinkCopy && <div className="credit-link-status"><SafetyCertificateOutlined /><div><Text strong>{creditLinkCopy}</Text><Text type="secondary">合同将始终以已生效信审边界为准，提交前可在下一步查看额度、账期和付款条件。</Text></div></div>}
           {creditWarning && <Alert type="warning" showIcon message="该客户暂无可用的已生效信审版本" description={<Space direction="vertical" size={4}><span>合同不能直接进入正式审查。请先完成客户信审审批，再返回发起合同。</span><Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => { window.location.hash = '/credit/new' }}>先发起客户信审</Button></Space>} />}
         </section>}
 
         {step === 1 && <section className="request-step-panel">
-          <Typography.Title level={4}>合同信息</Typography.Title>
+          <Typography.Title level={4}>合同信息与信审边界</Typography.Title>
           {!credits.length && <Alert type="warning" showIcon style={{ marginBottom: 16 }} message="没有可绑定的有效信审" />}
           <div className="review-meta-grid case-create-grid">
-            <Form.Item name="credit_case_id" label="已生效信审版本" rules={[{ required: true, message: '必须绑定已生效信审版本' }]}><Select placeholder="选择客户已生效的信审版本" options={credits.map(item => ({ value: item.case_id, label: `V${item.version} · 账期≤${item.conditions.max_payment_days}天 · 额度≤${item.conditions.max_credit_amount.toLocaleString()} ${item.conditions.currency}` }))} dropdownRender={menu => <><Button type="link" icon={<SafetyCertificateOutlined />} onClick={() => loadCredits()}>刷新信审版本</Button>{menu}</>} /></Form.Item>
+            <Form.Item name="credit_case_id" label={credits.length === 1 ? '系统自动关联的信审版本' : '系统推荐的信审版本'} rules={[{ required: true, message: '必须绑定已生效信审版本' }]}><Select placeholder="选择客户已生效的信审版本" options={credits.map(item => ({ value: item.case_id, label: `V${item.version} · 账期≤${item.conditions.max_payment_days}天 · 额度≤${item.conditions.max_credit_amount.toLocaleString()} ${item.conditions.currency}` }))} dropdownRender={menu => <><Button type="link" icon={<SafetyCertificateOutlined />} onClick={() => loadCredits()}>刷新信审版本</Button>{menu}</>} /></Form.Item>
             <Form.Item name="business_type" label="合同业务类型" rules={[{ required: true }]}><Select options={['一般', '模塑一体', 'TKM', 'TKP', '采购订单'].map(value => ({ value, label: value }))} /></Form.Item>
             <Form.Item name="priority" label="业务紧急度" rules={[{ required: true }]}><Select options={[{ value: 'low', label: '低' }, { value: 'normal', label: '普通' }, { value: 'high', label: '高' }, { value: 'urgent', label: '紧急' }]} /></Form.Item>
             <Form.Item name="due_at" label="期望完成时间"><DatePicker showTime format="YYYY-MM-DD HH:mm" style={{ width: '100%' }} /></Form.Item>

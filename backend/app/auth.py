@@ -86,7 +86,7 @@ class SettingsPatch(BaseModel):
 
 
 class SettingsTest(BaseModel):
-    kind: str = Field(default='llm', pattern='^(llm|rerank|embedding)$')
+    kind: str = Field(default='llm', pattern='^(llm|mask|rerank|embedding)$')
     api_base: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, max_length=500)
     model: str | None = Field(default=None, max_length=200)
@@ -232,7 +232,7 @@ def clear_legacy_model_env(request: Request, user=Depends(require('admin:users')
 @router.post('/admin/settings/test')
 async def test_settings(body: SettingsTest, user=Depends(require('admin:users'))):
     values = get_model_runtime_config()
-    prefix = {'llm': 'llm', 'rerank': 'rerank', 'embedding': 'embedding'}[body.kind]
+    prefix = {'llm': 'llm', 'mask': 'mask_llm', 'rerank': 'rerank', 'embedding': 'embedding'}[body.kind]
     base = (body.api_base or values.get(f'{prefix}_api_base') or values.get(f'{prefix}_base_url') or '').strip()
     key = (body.api_key or values.get(f'{prefix}_api_key', '')).strip()
     model = (body.model or values.get(f'{prefix}_model', '')).strip()
@@ -241,7 +241,7 @@ async def test_settings(body: SettingsTest, user=Depends(require('admin:users'))
         if not (base and key and model):
             return {'ok': False, 'kind': body.kind, 'message': '请填写 API 地址、API Key 和模型'}
         async with httpx.AsyncClient(timeout=12) as client:
-            if body.kind == 'llm':
+            if body.kind in {'llm', 'mask'}:
                 response = await client.post(_openai_endpoint(base, 'chat/completions'), headers={'Authorization': f'Bearer {key}'}, json={'model': model, 'messages': [{'role': 'user', 'content': 'Reply with OK only.'}], 'max_tokens': 2})
             elif body.kind == 'rerank':
                 response = await client.post(base.rstrip('/') + '/reranks', headers={'Authorization': f'Bearer {key}'}, json={'model': model, 'query': '信用风险', 'documents': ['企业财务报表证据'], 'top_n': 1})

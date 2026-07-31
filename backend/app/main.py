@@ -579,13 +579,22 @@ def _review_metadata(assignee_id: str, priority: str, due_at: str, request_note:
 @app.post('/api/case-center/cases/{case_id}/documents')
 async def case_document_review(case_id: str, file: UploadFile=File(...), business_type: str=Form(''), credit_case_id: str=Form(''), parent_job_id: str=Form(''), assignee_id: str=Form(''), priority: str=Form('normal'), due_at: str=Form(''), request_note: str=Form(''), document_role: str=Form('main'), user=Depends(require('review:create'))):
     if not secure_runtime_ready(): raise HTTPException(503,'安全运行环境未就绪：请配置 AUTH_SECRET 与 DATA_ENCRYPTION_KEY')
-    try: credit_case = store.require_active_credit_case(credit_case_id)
+    existing = store.get_case_center(case_id, user)
+    if not existing:
+        raise HTTPException(404, '合同案件不存在或无权访问')
+    requested_credit_id = str(credit_case_id or '').strip()
+    bound_credit_id = str(existing.get('credit_case_id') or '').strip()
+    try:
+        if bound_credit_id:
+            if requested_credit_id and requested_credit_id != bound_credit_id:
+                raise ValueError('上传请求的信审版本与合同案件已绑定版本不一致')
+            credit_case = store.require_active_credit_case(bound_credit_id)
+        else:
+            # This also safely repairs a case created before the browser had
+            # finished preserving a multi-step form field.
+            credit_case = store.bind_case_center_credit(case_id, requested_credit_id, user)
     except ValueError as e: raise HTTPException(409, str(e))
     metadata=_review_metadata(assignee_id,priority,due_at,request_note); job_id,path=_start_review(file,user); await _write_upload(file,path); created=time.time(); catalog=store.get_rule_version(); parent_report={}
-    if case_id:
-        existing = store.get_case_center(case_id, user)
-        if not existing:
-            raise HTTPException(404, '合同案件不存在或无权访问')
     if parent_job_id:
         _assert_case_access(parent_job_id, user); parent = store.get_review(parent_job_id)
         if not parent or parent.get('status') != 'done': raise HTTPException(400, '上一版本尚未完成，不能增量复审')

@@ -1,6 +1,6 @@
-import { useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Card, Row, Col, Statistic, Result, Tabs, Table, Descriptions, Empty, List, Button, Dropdown, Space, Typography, Alert, Tag, message, Modal, Input, Select } from 'antd'
-import { DownloadOutlined, SafetyCertificateOutlined, ReloadOutlined, FileWordOutlined, TranslationOutlined, SwapOutlined, FileTextOutlined } from '@ant-design/icons'
+import { DownloadOutlined, SafetyCertificateOutlined, ReloadOutlined, FileWordOutlined, TranslationOutlined, SwapOutlined, FileTextOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
 import type { KnowledgeItem, Report, Risk, RuleItem } from '../types'
 import { riskTableCols, clauseTableCols, overallColor, downloadText, roleRiskVisible, roleRiskHighlight } from './common'
 import { useRole, ROLE_DESC } from '../context/RoleContext'
@@ -42,8 +42,8 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   const [similarCases, setSimilarCases] = useState<KnowledgeItem[]>([])
   const [activeLang, setActiveLang] = useState('en')
   const [focusClauseId, setFocusClauseId] = useState<string>('')
+  const [focusRiskKey, setFocusRiskKey] = useState<string>('')
   const [mainTab, setMainTab] = useState('annotate')
-  const clauseRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const sm = report.summary || {}
   const oc = overallColor(sm.overall_level)
   const jid = jobId || report._job_id
@@ -52,16 +52,15 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   const reviewHints = report.review_hints || []
   const visibleRisks = allRisks.filter(r => roleRiskVisible(r, role))
   const hidden = allRisks.length - visibleRisks.length
-
-  const riskByClause = useMemo(() => {
-    const map: Record<string, Risk[]> = {}
-    for (const risk of visibleRisks) {
-      const key = risk.clause_id || ''
-      if (!map[key]) map[key] = []
-      map[key].push(risk)
-    }
-    return map
-  }, [visibleRisks])
+  const riskKey = (risk: Risk) => risk.finding_id || `${risk.clause_id}-${risk.rule_id}-${risk.level}`
+  const severityWeight: Record<string, number> = { high: 0, mid: 1, low: 2 }
+  const orderedRisks = useMemo(() => [...visibleRisks].sort((a, b) => {
+    const actionWeight = (risk: Risk) => risk.action_status === 'pending' || !risk.action_status ? 0 : 1
+    return actionWeight(a) - actionWeight(b) || (severityWeight[a.severity] ?? 3) - (severityWeight[b.severity] ?? 3)
+  }), [visibleRisks])
+  const activeRisk = orderedRisks.find(risk => riskKey(risk) === focusRiskKey) || orderedRisks[0]
+  const activeRiskIndex = activeRisk ? orderedRisks.findIndex(risk => riskKey(risk) === riskKey(activeRisk)) : -1
+  const activeClause = activeRisk ? (report.clauses || []).find(clause => clause.id === activeRisk.clause_id) : undefined
 
   const exportMarkdown = () => {
     const L: string[] = []
@@ -108,12 +107,20 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
     catch (e:any) { message.error(`版本比较失败：${e?.message || e}`) }
   }
 
-  const jumpToClause = (clauseId: string) => {
-    setFocusClauseId(clauseId)
+  const selectRisk = (risk: Risk) => {
+    setFocusRiskKey(riskKey(risk))
+    setFocusClauseId(risk.clause_id)
     setMainTab('annotate')
-    requestAnimationFrame(() => {
-      clauseRefs.current[clauseId]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    })
+  }
+  const jumpToClause = (clauseId: string) => {
+    const risk = orderedRisks.find(item => item.clause_id === clauseId)
+    if (risk) selectRisk(risk)
+    else { setFocusClauseId(clauseId); setMainTab('annotate') }
+  }
+  const moveRisk = (offset: number) => {
+    if (!orderedRisks.length) return
+    const next = Math.max(0, Math.min(orderedRisks.length - 1, (activeRiskIndex < 0 ? 0 : activeRiskIndex) + offset))
+    selectRisk(orderedRisks[next])
   }
 
   const rowClass = (r: Risk) => {
@@ -182,29 +189,31 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
           message={`待人工确认 ${reviewHints.length} 条：模型未能确认主体、条件、否定或审批例外；该清单不计入已确认风险。`} />}
 
         <Tabs activeKey={mainTab} onChange={setMainTab} items={[
-          { key:'annotate', label:'原文风险标注', children:
-            <Row gutter={16}>
-              <Col span={13} style={{maxHeight:520, overflow:'auto', paddingRight:8}}>
-                {(report.clauses||[]).length ? report.clauses.map(clause => {
-                  const risks = riskByClause[clause.id] || []
-                  const focused = focusClauseId === clause.id
-                  return <div key={clause.id} ref={el => { clauseRefs.current[clause.id] = el }}
-                    style={{border: focused ? '1px solid #1677ff' : '1px solid #f0f0f0', borderRadius:8, padding:12, marginBottom:10, background: risks.length ? '#fff7e6' : '#fff'}}>
-                    <Space style={{marginBottom:6}}><Tag color={risks.length?'orange':'default'}>{clause.id}</Tag><Text type="secondary">{clause.source_ref || `第 ${clause.start_page} 页`}</Text>{risks.map(r=><Tag key={r.rule_id+r.level} color="red">{r.rule_id}</Tag>)}</Space>
-                    <div>{highlightEvidence(clause.text, risks[0]?.evidence)}</div>
-                    {risks.map(r => <Alert key={(r.finding_id||'')+r.rule_id} style={{marginTop:8}} type={r.severity==='high'?'error':'warning'} showIcon
-                      message={`${r.rule_id} · ${r.level}`} description={<><div>证据：{r.evidence||'—'}</div><div>建议：{r.suggestion||'—'}</div></>} />)}
-                  </div>
-                }) : <Empty description="无条款原文"/>}
-              </Col>
-              <Col span={11}>
-                {visibleRisks.length ? <Table size="small" rowKey={(r:Risk)=>r.finding_id||r.clause_id+r.rule_id}
-                  columns={columns} dataSource={visibleRisks} pagination={{pageSize:8}}
-                  rowClassName={rowClass} scroll={{x:900}}
-                  onRow={(r)=>({ onClick: ()=>jumpToClause(r.clause_id), style:{ cursor:'pointer' }})}/>
-                  : <Empty description={hidden>0?'当前角色视角下无匹配风险':'未命中风险底线'}/>}
-              </Col>
-            </Row>
+          { key:'annotate', label:'问题条款工作区', children:
+            visibleRisks.length && activeRisk ? <section className="report-review-workspace">
+              <aside className="report-issue-nav">
+                <div className="report-issue-nav-head"><div><span className="card-kicker">ISSUE QUEUE</span><Text strong>问题条款导航</Text></div><Tag color="orange">{orderedRisks.length} 条</Tag></div>
+                <Text type="secondary" className="report-issue-nav-tip">优先显示尚未处置的高风险；处理后可继续下一条。</Text>
+                <div className="report-issue-nav-list">{orderedRisks.map((risk, index) => {
+                  const selected = riskKey(risk) === riskKey(activeRisk)
+                  const pending = risk.action_status === 'pending' || !risk.action_status
+                  return <button type="button" key={riskKey(risk)} className={`report-issue-nav-item${selected ? ' active' : ''}`} onClick={() => selectRisk(risk)}>
+                    <span className={`report-risk-dot ${risk.severity}`}></span><div><div><Text strong>#{index + 1} · {risk.clause_id || '未定位条款'}</Text><Tag color={risk.severity === 'high' ? 'red' : risk.severity === 'mid' ? 'orange' : 'blue'}>{risk.rule_id}</Tag></div><Text type="secondary">{risk.rule_baseline || risk.suggestion || '请核对条款内容'}</Text></div><em>{pending ? '待处理' : '已留痕'}</em>
+                  </button>
+                })}</div>
+              </aside>
+              <div className="report-review-content">
+                <section className="report-clause-focus">
+                  <div className="report-clause-focus-head"><div><span className="card-kicker">CURRENT CLAUSE</span><Space wrap><Tag color={activeRisk.severity === 'high' ? 'red' : activeRisk.severity === 'mid' ? 'orange' : 'blue'}>{activeRisk.level}</Tag><Text strong>{activeRisk.clause_id || '未定位条款'} · {activeRisk.rule_id}</Text><Text type="secondary">{activeClause?.source_ref || (activeClause ? `第 ${activeClause.start_page} 页` : '原文定位待确认')}</Text></Space></div><Space><Button size="small" icon={<LeftOutlined/>} disabled={activeRiskIndex <= 0} onClick={() => moveRisk(-1)}>上一条</Button><Button size="small" icon={<RightOutlined/>} iconPosition="end" disabled={activeRiskIndex >= orderedRisks.length - 1} onClick={() => moveRisk(1)}>下一条</Button></Space></div>
+                  <div className="report-clause-original">{activeClause ? highlightEvidence(activeClause.text, activeRisk.evidence) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未找到对应的合同原文条款"/>}</div>
+                </section>
+                <section className="report-risk-resolution">
+                  <div><span className="card-kicker">REVIEW DECISION</span><Text strong>本条处置建议</Text></div>
+                  <div className="report-risk-resolution-grid"><div><span>规则底线</span><p>{activeRisk.rule_baseline || '—'}</p></div><div><span>命中证据</span><p>{activeRisk.evidence || '—'}</p></div><div className="full"><span>建议修改</span><p>{activeRisk.suggestion || '系统未生成替换文本，请结合原文人工判断。'}</p></div>{activeRisk.numeric_note && <div className="full"><span>数值依据</span><p>{activeRisk.numeric_note}</p></div>}</div>
+                  {activeRisk.rule_id?.startsWith('CREDIT_') ? <Alert type="error" showIcon message="该项超出已生效信审边界" description="不能在合同端采纳、忽略或以例外审批放行；请更新客户信审后再复审合同。"/> : <div className="report-risk-resolution-action">{activeRisk.action_status ? <Tag color={activeRisk.action_status === 'ignored' ? 'default' : 'green'}>{activeRisk.action_status === 'ignored' ? '已确认不适用' : `已${activeRisk.action_status}`}</Tag> : <Tag color="orange">待人工处置</Tag>}<Text type="secondary">处置理由、编辑稿及相似案例会写入当前案件审计记录。</Text>{canAct && <Button type="primary" onClick={() => openAction(activeRisk)}>处理本条风险</Button>}</div>}
+                </section>
+              </div>
+            </section> : <Empty description={hidden>0?'当前角色视角下无匹配风险':'未命中风险底线'}/>
           },
           { key:'risks', label:`风险清单 (${visibleRisks.length})`, children:
             visibleRisks.length ? <Table size="small" rowKey={(r:Risk)=>r.finding_id||r.clause_id+r.rule_id}

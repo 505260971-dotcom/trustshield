@@ -15,6 +15,23 @@ const toPayload=(v:any)=>({customer_name:v.customer_name,request_note:v.request_
 const money=(value:any,currency='CNY')=>`${Number(value||0).toLocaleString(undefined,{maximumFractionDigits:2})} ${currency}`
 const traceActionText:Record<string,string>={tool:'读取证据工具',submit_claims:'提交 Claim 核验',request_materials:'请求补件',finish:'结束审计'}
 const textValue=(value:any)=>typeof value==='string'?value:JSON.stringify(value)
+const evidenceValue=(item:any)=>{
+  const value=item?.value
+  if(value===null||value===undefined||value==='')return '—'
+  if(typeof value!=='object')return String(value)
+  if(value.summary)return String(value.summary)
+  if(value.entity_name)return String(value.entity_name)
+  if(value.metric)return `${value.metric}：${value.value??value.source_value??'—'} ${value.currency||''}`.trim()
+  if(value.evidence_quote)return String(value.evidence_quote)
+  return '结构化来源证据（请展开 ReAct 审计详情查看）'
+}
+const auditFailureMessage=(reason:any)=>{
+  const value=String(reason||'')
+  if(value.startsWith('agent_call_failed:APITimeoutError'))return '主审查模型调用超时，系统已自动重试 1 次。已核验的证据会保留，但本次不会生成评分或授信建议。'
+  if(value.startsWith('agent_call_failed:'))return '主审查模型调用失败，系统已自动重试 1 次。已核验的证据会保留，但本次不会生成评分或授信建议。'
+  if(value==='financial_audit_agent_not_configured')return '主审查模型尚未配置完成，本次没有使用固定模板或局部材料替代。'
+  return '生产信审运行未完成，系统没有使用固定模板或局部材料替代。'
+}
 const traceProgressText=(progress:any)=>{
   const missing=(progress?.missing_metrics||[]).join('、')
   return `核验进度：主体 ${progress?.identity_verified?'✓':'—'} · 口径 ${progress?.financial_context_verified?'✓':'—'} · 指标 ${progress?.verified_metrics?.length||0}/7${missing?`（缺 ${missing}）`:''}`
@@ -91,6 +108,7 @@ export default function CreditPage({focusCaseId,startNew,initialCustomerKey}:{fo
         {assessment?.status==='error'&&<Alert type="error" showIcon message="评估失败" description={assessment.error||'请检查材料格式与运行环境'} style={{marginBottom:12}}/>}
          {analysis?<>{typeof score==='number'?<Space align="center" size="large"><Progress type="circle" percent={score} format={()=>`${score}/100`}/><Descriptions column={1} size="small"><Descriptions.Item label="信用等级"><Tag color={analysis.credit_grade==='A'?'green':analysis.credit_grade==='B'?'blue':'orange'}>{analysis.credit_grade}</Tag></Descriptions.Item><Descriptions.Item label="模型版本">{assessment?.model_version}</Descriptions.Item><Descriptions.Item label="材料覆盖率">{Math.round((analysis.scorecard?.coverage||0)*100)}%</Descriptions.Item><Descriptions.Item label="建议额度">{money(analysis.recommendation?.max_credit_amount,currency)}</Descriptions.Item><Descriptions.Item label="建议可用额度">{money(analysis.recommendation?.available_credit_amount,currency)}</Descriptions.Item><Descriptions.Item label="建议最长账期">{analysis.recommendation?.max_payment_days} 天</Descriptions.Item><Descriptions.Item label="建议最低预付款">{analysis.recommendation?.min_prepayment_ratio}%</Descriptions.Item></Descriptions></Space>:<Alert type="warning" showIcon message="未形成授信评分或建议" description="生产 Agent 未达到全部核心 Claim 的核验门槛；系统没有使用固定模板或局部材料替代。"/>}
            <Alert style={{marginTop:12}} type={analysis.model_status==='ready_for_reviewer'?'success':'warning'} showIcon message={narrative?.conclusion||'量化评估已完成'} description={narrative?.summary}/>
+           {auditRuntime?.status==='execution_failed'&&<Alert style={{marginTop:12}} type="error" showIcon message="ReAct 审计未完成" description={auditFailureMessage(auditRuntime.reason)}/>}
            {user?.role!=='business'&&auditRuntime&&<Button type="link" style={{marginTop:8,paddingLeft:0}} onClick={()=>setShowAuditDetail(value=>!value)}>{showAuditDetail?'收起 ReAct 审计详情':'查看 ReAct 审计详情（用于追溯与排障）'}</Button>}
            {showAuditDetail&&user?.role!=='business'&&auditRuntime&&<Card size="small" style={{marginTop:12}} title={<Space>ReAct 审计运行态（审批只读） <Tag color={agentStatusColor[auditRuntime.status]||'default'}>{auditRuntime.status||'unknown'}</Tag></Space>}>
              <Text type="secondary">生产 Agent 只可读取受控证据、检索、核验 Claim 和请求补件；无评分、审批、写入或授信变更工具。</Text>
@@ -129,7 +147,7 @@ export default function CreditPage({focusCaseId,startNew,initialCustomerKey}:{fo
           )}
           {showAuditDetail&&(assessment?.report?.audit_plan?.tasks||[]).length>0&&<List size="small" header={`Agent 审查计划 · ${assessment.report.audit_plan.mode==='llm_planned'?'LLM 自主规划':'安全回退计划'}`} dataSource={assessment.report.audit_plan.tasks} renderItem={(item:any)=><List.Item><Space direction="vertical" size={1}><Text strong>{item.task_id} · {item.objective}</Text><Text type="secondary">{item.priority==='high'?'高优先级':'常规优先级'} · 目标事实：{(item.target_facts||[]).join('、')||'材料充分性核验'}</Text><Text type="secondary">检索：{item.query}</Text></Space></List.Item>}/>} {/* audit-plan */}
           {showAuditDetail&&(assessment?.report?.audit_task_results||[]).length>0&&<List size="small" header="Agent 任务核验结果" dataSource={assessment.report.audit_task_results} renderItem={(item:any)=><List.Item><Space direction="vertical" size={1}><Space><Tag color={item.status==='verified'?'green':item.status==='conflict'?'red':'orange'}>{item.status}</Tag><Text>{item.task_id}</Text></Space>{(item.missing_information||[]).length>0&&<Text type="secondary">{item.missing_information.join('；')}</Text>}{(item.conflicts||[]).length>0&&<Text type="danger">{item.conflicts.join('；')}</Text>}{(item.observations||[]).map((observation:any,index:number)=><Text key={index} type="secondary">[{observation.category}] {observation.summary}（{observation.source_ref}）</Text>)}</Space></List.Item>}/>} {/* audit-task-results */}
-          {(analysis.risk_flags||[]).length>0&&<List size="small" header="风险与制度阻断" dataSource={analysis.risk_flags} renderItem={(item:any)=><List.Item><Tag color={item.level==='high'?'red':'orange'}>{item.code}</Tag>{item.message}</List.Item>}/>} {(assessment?.report?.missing_materials||[]).length>0&&<List size="small" header="待补材料" dataSource={assessment?.report?.missing_materials} renderItem={(item:any)=><List.Item><Tag>{item.type}</Tag>{item.title}：{item.detail}</List.Item>}/>} {(assessment?.evidence||[]).length>0&&<List size="small" header="已固化的来源证据" dataSource={assessment?.evidence} renderItem={(item:any)=><List.Item><Tag>{item.field_name}</Tag><Text>{String(item.value)}</Text><Text type="secondary">{item.source_ref||'来源待确认'}</Text></List.Item>}/>}</>:<Alert type="info" showIcon message="尚未运行量化评估" description="上传财报/信用报告，保存应收与订单敞口后，运行 Agent 生成可追溯的量化建议。"/>}
+          {(analysis.risk_flags||[]).length>0&&<List size="small" header="风险与制度阻断" dataSource={analysis.risk_flags} renderItem={(item:any)=><List.Item><Tag color={item.level==='high'?'red':'orange'}>{item.code}</Tag>{item.message}</List.Item>}/>} {(assessment?.report?.missing_materials||[]).length>0&&<List size="small" header="待补材料" dataSource={assessment?.report?.missing_materials} renderItem={(item:any)=><List.Item><Tag>{item.type}</Tag>{item.title}：{item.detail}</List.Item>}/>} {(assessment?.evidence||[]).length>0&&<List size="small" header="已固化的来源证据" dataSource={assessment?.evidence} renderItem={(item:any)=><List.Item><Tag>{item.field_name}</Tag><Text>{evidenceValue(item)}</Text><Text type="secondary">{item.source_ref||'来源待确认'}</Text></List.Item>}/>}</>:<Alert type="info" showIcon message="尚未运行量化评估" description="上传财报/信用报告，保存应收与订单敞口后，运行 Agent 生成可追溯的量化建议。"/>}
         </>}
         {detailStep===3&&<><Divider titlePlacement="start">审核专员确认与修订</Divider>
         {canManage&&['draft','returned_to_reviewer'].includes(detail.status)?<Card size="small" title="以 Agent/模型建议为默认依据">

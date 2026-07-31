@@ -789,8 +789,15 @@ def node_react_audit(state: CreditState) -> CreditState:
 def _not_assessable_result(audit: dict[str, Any], exposure: dict[str, Any] | None) -> dict[str, Any]:
     status = str(audit.get('status') or 'not_assessable')
     code = 'AGENT_EXECUTION_FAILED' if status == 'execution_failed' else 'AGENT_EVIDENCE_INSUFFICIENT'
-    message = ('生产信审Agent或强制重排服务未能执行，系统未采用固定匹配替代。'
-               if status == 'execution_failed' else '核心主体、期间、口径或财务事实未形成经验证Claim，系统不能给出授信建议。')
+    reason = str(audit.get('reason') or '')
+    if status == 'execution_failed' and reason.startswith('agent_call_failed:APITimeoutError'):
+        message = '主审查模型调用超时，系统已自动重试 1 次仍未完成；系统未采用固定匹配替代。'
+    elif status == 'execution_failed' and reason.startswith('agent_call_failed:'):
+        message = '主审查模型调用失败，系统已自动重试 1 次仍未完成；系统未采用固定匹配替代。'
+    elif status == 'execution_failed':
+        message = '生产信审Agent或强制重排服务未能执行，系统未采用固定匹配替代。'
+    else:
+        message = '核心主体、期间、口径或财务事实未形成经验证Claim，系统不能给出授信建议。'
     return {
         'business_type': '一般', 'model_status': 'execution_failed' if status == 'execution_failed' else 'not_assessable',
         'credit_grade': 'UNASSESSABLE',

@@ -160,14 +160,46 @@ def _system_prompt() -> str:
 - compare_claims：arguments 为 {"claim_ids":[...]}; 返回这些 Claim 的已验证数值、期间、币种及来源，以便处理冲突。
 - submit_claims：claims 是待验证Claim。支持 identity、financial_context、financial_metric、observation。
   identity: claim_id, entity_name, evidence_id, evidence_quote。
-  financial_context: claim_id, entity_name, period, scope(consolidated|standalone), currency(CNY|HKD|USD), source_unit(base|thousand|ten_thousand|million|billion), evidence_id, evidence_quote。
+  financial_context: claim_id, entity_name, period, scope(consolidated|standalone), currency(CNY|HKD|USD), source_unit(base|thousand|ten_thousand|million|billion), evidence_id, evidence_quote；如同页页眉将字段拆开，可改为 evidence_refs:[{evidence_id,evidence_quote}, ...]。
   financial_metric: claim_id, metric(revenue|current_assets|current_liabilities|total_assets|total_liabilities|net_profit|operating_cashflow), value(材料原始数值), context_id, evidence_id, evidence_quote。
   observation: claim_id, category, summary, evidence_id, evidence_quote。
   不具备原始来源、主体、期间、单位或数值的内容不得提交为财务Claim。
-  evidence_id 必须使用工具返回的 chunk_id（或同一来源的 source_ref）；financial_context 的单条 evidence_quote 必须在同一来源块中同时包含主体、期间、合并/单体口径、币种和单位。不要把这些字段拆到多个来源块。
+  evidence_id 必须使用工具返回的 chunk_id（或同一来源的 source_ref）。financial_context 可以使用一条完整引文，或最多四条 evidence_refs；每条引文均须原样存在于其来源块，且这些来源必须属于同一文档、同一页。证据合起来必须证明主体、期间、合并/单体口径、币种和单位；不得跨页、跨文档拼接。
 - request_materials：列出无法通过当前材料解决的具体补件。
 - finish：仅当所有可验证工作已完成；不要用猜测填补空白。
 系统强制要求：客户主体、财务口径/期间/币种/单位，以及七个核心财务指标都必须得到验证；否则系统只会输出不可评估，不会评分。'''
+
+
+def _financial_context_evidence(raw: dict[str, Any], chunks: dict[str, dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+    """Validate a small, same-page source bundle for a financial context.
+
+    Header facts in statements are often split over adjacent structured blocks.
+    This does not relax provenance: each quote still has to match its exact
+    visible source block, and all blocks must resolve to one document page.
+    """
+    supplied = raw.get('evidence_refs')
+    if supplied in (None, ''):
+        supplied = [{'evidence_id': raw.get('evidence_id') or raw.get('source_chunk_id') or raw.get('source_ref'),
+                     'evidence_quote': raw.get('evidence_quote')}]
+    if not isinstance(supplied, list) or not supplied or len(supplied) > 4:
+        return [], '财务口径Claim需提供一至四条同页来源引文'
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in supplied:
+        if not isinstance(item, dict):
+            return [], '财务口径Claim的来源引文格式无效'
+        evidence_id = _visible_evidence_id(item, chunks)
+        chunk = chunks.get(evidence_id)
+        quote = str(item.get('evidence_quote') or '')
+        if not evidence_id or evidence_id in seen or not _quote_ok(quote, chunk):
+            return [], '财务口径Claim存在重复、不可见或无法在来源块定位的引文'
+        seen.add(evidence_id)
+        refs.append({'evidence_id': evidence_id, 'quote': quote[:500], 'chunk': chunk})
+    document_ids = {str(item['chunk'].get('document_id') or '') for item in refs}
+    pages = {item['chunk'].get('page') for item in refs}
+    if len(document_ids) != 1 or '' in document_ids or len(pages) != 1 or None in pages:
+        return [], '财务口径Claim的多来源证据必须来自同一文档同一页'
+    return refs, ''
 
 
 def _validate_claims(raw_claims: list[Any], chunks: dict[str, dict[str, Any]], case: dict[str, Any], accepted: dict[str, dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -179,11 +211,22 @@ def _validate_claims(raw_claims: list[Any], chunks: dict[str, dict[str, Any]], c
             continue
         kind = _claim_kind(raw)
         claim_id = str(raw.get('claim_id') or '').strip()[:80]
-        evidence_id = _visible_evidence_id(raw, chunks)
-        chunk = chunks.get(evidence_id)
-        quote = str(raw.get('evidence_quote') or '')
-        if not claim_id or claim_id in accepted or not _quote_ok(quote, chunk):
+        context_refs: list[dict[str, Any]] = []
+        context_error = ''
+        if kind == 'financial_context':
+            context_refs, context_error = _financial_context_evidence(raw, chunks)
+            evidence_id = context_refs[0]['evidence_id'] if context_refs else ''
+            chunk = context_refs[0]['chunk'] if context_refs else None
+            quote = '；'.join(item['quote'] for item in context_refs)
+        else:
+            evidence_id = _visible_evidence_id(raw, chunks)
+            chunk = chunks.get(evidence_id)
+            quote = str(raw.get('evidence_quote') or '')
+        if (not claim_id or claim_id in accepted or context_error
+                or (kind != 'financial_context' and not _quote_ok(quote, chunk))):
             rejected.append({'claim_id': claim_id, 'reason': 'claim_id 重复/缺失，或引文不在指定来源块中'})
+            if context_error:
+                rejected[-1]['reason'] = context_error
             continue
         base = {'claim_id': claim_id, 'type': kind, 'evidence_id': evidence_id, 'evidence_quote': quote[:500],
                 'document_id': str((chunk or {}).get('document_id') or ''), 'source_ref': str((chunk or {}).get('source_ref') or ''),
@@ -202,7 +245,7 @@ def _validate_claims(raw_claims: list[Any], chunks: dict[str, dict[str, Any]], c
             scope = _enum_alias(raw.get('scope'), _SCOPE_ALIASES)
             currency = _enum_alias(raw.get('currency'), _CURRENCY_ALIASES)
             unit = _enum_alias(raw.get('source_unit'), _UNIT_ALIASES)
-            if (_normal(case.get('customer_name')) not in _normal(entity) or not period or scope not in {'consolidated', 'standalone'}
+            if (_normal(case.get('customer_name')) not in _normal(entity) or _normal(entity) not in _normal(quote) or not period or scope not in {'consolidated', 'standalone'}
                     or currency not in {'CNY', 'HKD', 'USD'} or unit not in _MULTIPLIER):
                 rejected.append({'claim_id': claim_id, 'reason': '财务口径Claim缺主体、期间、合并范围、币种或单位'})
                 continue
@@ -215,13 +258,22 @@ def _validate_claims(raw_claims: list[Any], chunks: dict[str, dict[str, Any]], c
             if (_normal(period) not in quote_normal or not any(word in quote_normal for word in scope_words)
                     or not any(_normal(word) in quote_normal for word in currency_words)
                     or not any(_normal(word) in quote_normal for word in unit_words)):
-                rejected.append({'claim_id': claim_id, 'reason': '财务口径Claim的引文未同时证明期间、口径、币种和单位'})
+                rejected.append({'claim_id': claim_id, 'reason': '财务口径Claim的同页来源引文未共同证明期间、口径、币种和单位'})
                 continue
             years = [int(item) for item in re.findall(r'20\d{2}', period)]
             if not years or datetime.now().year - max(years) > CREDIT_AUDIT_MAX_FINANCIAL_AGE_YEARS:
                 rejected.append({'claim_id': claim_id, 'reason': '财务期间缺少可验证年份或已超过自动审计时效'})
                 continue
-            valid.append(base | {'entity_name': entity, 'period': period[:80], 'scope': scope, 'currency': currency, 'source_unit': unit})
+            source_refs = []
+            evidence_refs = []
+            for item in context_refs:
+                source = str(item['chunk'].get('source_ref') or '')
+                if source and source not in source_refs:
+                    source_refs.append(source)
+                evidence_refs.append({'evidence_id': item['evidence_id'], 'evidence_quote': item['quote'],
+                                      'source_ref': source, 'page': item['chunk'].get('page')})
+            valid.append(base | {'entity_name': entity, 'period': period[:80], 'scope': scope, 'currency': currency, 'source_unit': unit,
+                                 'source_ref': '；'.join(source_refs), 'evidence_refs': evidence_refs})
         elif kind == 'financial_metric':
             metric, context_id = _enum_alias(raw.get('metric'), _METRIC_ALIASES), str(raw.get('context_id') or '')
             number = _number_ok(raw.get('value'), chunk)
@@ -364,6 +416,26 @@ def _page_context_selection(chunks: list[dict[str, Any]]) -> list[dict[str, Any]
     return [*prose[:6], *structured[:10]][:16]
 
 
+def _invoke_agent_with_one_retry(messages: list[Any]) -> tuple[Any, int]:
+    """Make one bounded retry for transient provider failures.
+
+    The retry only repeats the same read-only model turn.  It never creates
+    facts locally and remains bounded so an unavailable provider cannot hold a
+    credit assessment indefinitely.
+    """
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            llm = get_financial_llm(json_mode=True, temperature=0, max_tokens=1800, timeout=60, max_retries=0)
+            return invoke_remote(llm, messages, completion_tokens=1800), attempt
+        except Exception as exc:  # Provider / transport errors are classified by caller.
+            last_error = exc
+            if attempt == 0:
+                time.sleep(0.75)
+    assert last_error is not None
+    raise last_error
+
+
 def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]], records_by_document: dict[str, list[dict[str, Any]]], exposure: dict[str, Any] | None,
                            max_steps: int | None = None) -> dict[str, Any]:
     """Execute a bounded ReAct loop and return only independently verified facts."""
@@ -411,11 +483,10 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
         if controller_note:
             messages.append(SystemMessage(content='运行控制指令（高优先级）：' + controller_note))
         try:
-            llm = get_financial_llm(json_mode=True, temperature=0, max_tokens=1800, timeout=45, max_retries=0)
-            response = invoke_remote(llm, messages, completion_tokens=1800)
+            response, retry_count = _invoke_agent_with_one_retry(messages)
             action = _json(response.content)
         except Exception as exc:
-            return {'status': 'execution_failed', 'reason': f'agent_call_failed:{type(exc).__name__}', 'facts': {}, 'claims': list(accepted.values()),
+            return {'status': 'execution_failed', 'reason': f'agent_call_failed:{type(exc).__name__}:after_one_retry', 'facts': {}, 'claims': list(accepted.values()),
                     'trace': trace, 'material_requests': requests, 'manifests': manifests}
         raw_action = str(action.get('action') or '').lower()
         name = raw_action
@@ -431,7 +502,8 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
             arguments = {}
         trace.append({'step': step, 'reason_summary': str(action.get('reason_summary') or '')[:600], 'action': name,
                       'tool': tool_name, 'arguments': _safe_arguments(arguments), 'progress': progress_before,
-                      'controller_note': controller_note, 'normalized_action': raw_action if raw_action != name else ''})
+                      'controller_note': controller_note, 'normalized_action': raw_action if raw_action != name else '',
+                      'model_retry_count': retry_count})
         observation: dict[str, Any]
         if name == 'tool':
             tool = tool_name
