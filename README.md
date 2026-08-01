@@ -274,8 +274,9 @@ python scripts/test_credit_react_agent.py
 2. [企业定制项对照](./docs/01-产品与架构/enterprise-customization.md)
 3. [接口契约](./docs/02-接口与验收/api-contract.md)
 4. [合同评审验收基线](./docs/02-接口与验收/contract-review-baseline.md)
-5. [从零实跑操作说明](./docs/03-演示与交付/模拟测试材料/10-从零实跑操作说明.md)
-6. [演示脚本](./docs/03-演示与交付/demo-script.md)
+5. [启明智造场景材料包](./docs/03-演示与交付/模拟测试材料-v2-启明智造场景/README.md)
+6. [启明智造逐步演练手册](./docs/03-演示与交付/模拟测试材料-v2-启明智造场景/08-逐步演练手册.md)
+7. [演示脚本](./docs/03-演示与交付/demo-script.md)
 
 ## 数据安全与使用边界
 
