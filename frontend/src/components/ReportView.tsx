@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Card, Row, Col, Statistic, Result, Tabs, Table, Descriptions, Empty, List, Button, Collapse, Dropdown, Space, Typography, Alert, Tag, message, Modal, Input, Select } from 'antd'
-import { DownloadOutlined, SafetyCertificateOutlined, ReloadOutlined, FileWordOutlined, TranslationOutlined, SwapOutlined, FileTextOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
+import { DownloadOutlined, SafetyCertificateOutlined, ReloadOutlined, FileWordOutlined, TranslationOutlined, SwapOutlined, FileTextOutlined, LeftOutlined, RightOutlined, DashboardOutlined, RobotOutlined, WarningOutlined, ProfileOutlined, AuditOutlined } from '@ant-design/icons'
 import type { KnowledgeItem, Report, Risk, RuleItem, SignabilityPlan as SignabilityPlanData, VersionComparison } from '../types'
 import { riskTableCols, clauseTableCols, overallColor, downloadText, roleRiskVisible, roleRiskHighlight } from './common'
 import { useRole, ROLE_DESC } from '../context/RoleContext'
@@ -51,6 +51,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   const [focusClauseId, setFocusClauseId] = useState<string>('')
   const [focusRiskKey, setFocusRiskKey] = useState<string>('')
   const [mainTab, setMainTab] = useState('annotate')
+  const [workspaceTab, setWorkspaceTab] = useState('overview')
   const sm = report.summary || {}
   const oc = overallColor(sm.overall_level)
   const jid = jobId || report._job_id
@@ -132,8 +133,9 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   const selectRisk = (risk: Risk) => {
     setFocusRiskKey(riskKey(risk))
     setFocusClauseId(risk.clause_id)
+    setWorkspaceTab('risks')
     setMainTab('annotate')
-    window.setTimeout(() => document.getElementById('report-risk-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0)
+    window.setTimeout(() => document.getElementById('report-risk-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80)
   }
   const jumpToClause = (clauseId: string) => {
     const risk = orderedRisks.find(item => item.clause_id === clauseId)
@@ -191,15 +193,33 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
 
       <TaskContextBanner role={role} title="合同审查结果工作区" description={reportContext} nextAction={reportNextAction}/>
 
-      <ContractDecisionSummary report={report} visibleRisks={visibleRisks} onSelectRisk={selectRisk} />
-
-      <SignabilityPlan plan={signability} loading={signabilityLoading} items={visiblePlanItems} />
-
-      <CaseReviewAssistant report={report} risks={visibleRisks} onSelectRisk={selectRisk} />
-
-      {jid && <ContractReviewWorkspace jobId={jid} report={report}/>}
-
-      <Card id="report-risk-card" title={`风险清单（${visibleRisks.length} 条${hidden>0?` · 当前视角已过滤 ${hidden} 条`:''}）`} extra={
+      <Tabs
+        className="report-workspace-tabs"
+        activeKey={workspaceTab}
+        onChange={setWorkspaceTab}
+        items={[
+          {
+            key: 'overview',
+            label: <span className="report-workspace-tab-label"><DashboardOutlined />决策总览</span>,
+            children: <div className="report-workspace-pane">
+              <ContractDecisionSummary report={report} visibleRisks={visibleRisks} onSelectRisk={selectRisk} />
+              <SignabilityPlan plan={signability} loading={signabilityLoading} items={visiblePlanItems} />
+            </div>,
+          },
+          {
+            key: 'ai',
+            label: <span className="report-workspace-tab-label"><RobotOutlined />AI 审查与证据</span>,
+            children: <div className="report-workspace-pane report-ai-pane">
+              {jid && (
+                <ContractReviewWorkspace jobId={jid} report={report}/>
+              )}
+              <CaseReviewAssistant report={report} risks={visibleRisks} onSelectRisk={selectRisk} />
+            </div>,
+          },
+          {
+            key: 'risks',
+            label: <span className="report-workspace-tab-label"><WarningOutlined />风险处置 <em>{visibleRisks.length}</em></span>,
+            children: <Card id="report-risk-card" title={`风险清单（${visibleRisks.length} 条${hidden>0?` · 当前视角已过滤 ${hidden} 条`:''}）`} extra={
         <Space wrap>
           <Dropdown menu={{items:[{key:'revised',label:'导出修订建议稿',icon:<FileWordOutlined/>,disabled:!jid},{key:'plain',label:'导出原文留档',icon:<FileTextOutlined/>,disabled:!jid},{key:'bilingual',label:`导出双语对照稿（${activeLang.toUpperCase()}）`,icon:<FileWordOutlined/>,disabled:!jid},{type:'divider'},{key:'markdown',label:'导出 Markdown',icon:<DownloadOutlined/>},{key:'json',label:'导出 JSON'}],onClick:({key})=>{if(key==='revised')exportWord('revised');else if(key==='plain')exportWord('plain');else if(key==='bilingual')exportWord('bilingual',activeLang);else if(key==='markdown')exportMarkdown();else if(key==='json')downloadText(`${report.filename}.json`, JSON.stringify(report,null,2),'application/json')}}}><Button icon={<DownloadOutlined/>} loading={!!exporting}>导出交付物</Button></Dropdown>
           <Select size="small" value={activeLang} style={{width:110}} onChange={setActiveLang}
@@ -256,25 +276,37 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
             reviewHints.length ? <Table size="small" rowKey={(r:Risk)=>`review-${r.clause_id}-${r.rule_id}`}
               columns={riskTableCols} dataSource={reviewHints} pagination={{pageSize:12}} scroll={{x:1365}}/>
               : <Empty description="强模型未发现需要人工补充确认的条款"/> },
-          { key:'fields', label:'合同字段摘要', children:
-            <Descriptions bordered column={2} size="small">
-              <Descriptions.Item label="我方(立场)">{report.contract_fields?.our_party||'—'}</Descriptions.Item>
-              <Descriptions.Item label="业务类型">{report.contract_fields?.business_type||'—'}</Descriptions.Item>
-              <Descriptions.Item label="甲方">{report.contract_fields?.parties?.['甲方']||'—'}</Descriptions.Item>
-              <Descriptions.Item label="乙方">{report.contract_fields?.parties?.['乙方']||'—'}</Descriptions.Item>
-              <Descriptions.Item label="合同有效期(年)">{report.contract_fields?.validity_years ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="交易金额">{report.contract_fields?.total_amount ?? '—'} {report.contract_fields?.currency||''}</Descriptions.Item>
-              <Descriptions.Item label="付款节点" span={2}>{report.contract_fields?.payment_terms||'—'}</Descriptions.Item>
-            </Descriptions> },
-          { key:'clauses', label:`条款列表 (${report.clauses.length})`, children:
-            <Table size="small" rowKey="id" columns={clauseTableCols} dataSource={report.clauses} pagination={{pageSize:10}}/> },
-          { key:'steps', label:`审查链路 (${report.steps.length})`, children:
-            <List size="small" dataSource={report.steps} renderItem={(s:string, i:number)=>
-              <List.Item><Text>{i+1}. {s}</Text></List.Item>}/> }
         ]}/>
-      </Card>
-
-      {showLegacyWorkflow && <Collapse className="case-technical-collapse" items={[{key:'workflow',label:'查看 Agent 运行轨迹与流程技术详情',children:<CaseWorkflowPanel jobId={jid}/>}]} />}
+      </Card>,
+          },
+          {
+            key: 'details',
+            label: <span className="report-workspace-tab-label"><ProfileOutlined />合同明细</span>,
+            children: <Card title="合同结构化明细" className="report-details-card">
+              <Tabs items={[
+                { key: 'fields', label: '合同字段', children: <Descriptions bordered column={2} size="small">
+                  <Descriptions.Item label="我方(立场)">{report.contract_fields?.our_party||'—'}</Descriptions.Item>
+                  <Descriptions.Item label="业务类型">{report.contract_fields?.business_type||'—'}</Descriptions.Item>
+                  <Descriptions.Item label="甲方">{report.contract_fields?.parties?.['甲方']||'—'}</Descriptions.Item>
+                  <Descriptions.Item label="乙方">{report.contract_fields?.parties?.['乙方']||'—'}</Descriptions.Item>
+                  <Descriptions.Item label="合同有效期(年)">{report.contract_fields?.validity_years ?? '—'}</Descriptions.Item>
+                  <Descriptions.Item label="交易金额">{report.contract_fields?.total_amount ?? '—'} {report.contract_fields?.currency||''}</Descriptions.Item>
+                  <Descriptions.Item label="付款节点" span={2}>{report.contract_fields?.payment_terms||'—'}</Descriptions.Item>
+                </Descriptions> },
+                { key: 'clauses', label: `条款列表 (${report.clauses.length})`, children: <Table size="small" rowKey="id" columns={clauseTableCols} dataSource={report.clauses} pagination={{pageSize:10}}/> },
+                { key: 'steps', label: `审查链路 (${report.steps.length})`, children: <List size="small" dataSource={report.steps} renderItem={(s:string, i:number)=><List.Item><Text>{i+1}. {s}</Text></List.Item>}/> },
+              ]}/>
+            </Card>,
+          },
+          {
+            key: 'audit',
+            label: <span className="report-workspace-tab-label"><AuditOutlined />流程与审计</span>,
+            children: showLegacyWorkflow
+              ? <Collapse className="case-technical-collapse" defaultActiveKey={[]} items={[{key:'workflow',label:'Agent 运行轨迹与流程技术详情',children:<CaseWorkflowPanel jobId={jid}/>}]} />
+              : <Empty description="当前页面未加载流程审计详情" />,
+          },
+        ]}
+      />
 
       <TranslateModal jobId={jid} open={transOpen} onClose={()=>setTransOpen(false)} onTranslated={(lang)=>setActiveLang(lang)} />
       <Modal title={`处置风险 ${actionRisk?.rule_id||''}`} open={!!actionRisk} onCancel={()=>setActionRisk(null)} onOk={submitAction} okText="确认提交" confirmLoading={actionBusy}>
