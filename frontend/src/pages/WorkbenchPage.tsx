@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Badge, Button, Card, Empty, List, Segmented, Space, Spin, Tag, Typography, message } from 'antd'
-import { ArrowRightOutlined, ClockCircleOutlined, FileAddOutlined, FolderOpenOutlined, SafetyCertificateOutlined, UnorderedListOutlined, WarningOutlined } from '@ant-design/icons'
+import { ArrowRightOutlined, CheckCircleOutlined, ClockCircleOutlined, FileAddOutlined, FolderOpenOutlined, SafetyCertificateOutlined, UnorderedListOutlined, WarningOutlined } from '@ant-design/icons'
 import { api } from '../services/api'
 import type { WorkboxItem } from '../types'
 import { fmtTime } from '../components/common'
 import { useAuth } from '../context/AuthContext'
+import { stageInfo, workItemAction } from '../components/workflow'
 
 const { Text, Title } = Typography
 type Bucket = 'todo' | 'in_progress' | 'draft' | 'done'
@@ -51,10 +52,7 @@ const roleGuidance: Record<string, { label: string; summary: string; steps: Arra
 }
 
 function actionLabel(item: WorkboxItem) {
-  if (item.source_type === 'credit') return item.current_stage === 'pending_director' || item.current_stage === 'pending_final' ? '作出审批决定' : '进入信审处理'
-  if (item.current_stage === 'awaiting_business') return '补充材料 / 上传修订版'
-  if (item.current_stage === 'ready_to_sign') return '确认签约与归档'
-  return '进入合同处理'
+  return workItemAction(item)
 }
 
 export default function WorkbenchPage({ onCreateContract, onCreateCredit, onOpenCase, onOpenCredit, onNavigate, canCreateContract, canCreateCredit }: Props) {
@@ -109,10 +107,13 @@ export default function WorkbenchPage({ onCreateContract, onCreateCredit, onOpen
     {focus && <Card className="focus-action-card" title={<Space><WarningOutlined /><span>优先处理</span></Space>} extra={<Tag color={focus.source_type === 'credit' ? 'cyan' : 'blue'}>{focus.source_type === 'credit' ? '客户信审' : '合同案件'}</Tag>}>
       <div className="focus-action-content"><div className="focus-action-main"><div className="focus-action-title"><Text strong>{focus.customer_name}</Text><Tag color={focus.priority === 'urgent' ? 'red' : focus.priority === 'high' ? 'orange' : 'default'}>{priorityLabel[focus.priority] || '普通'}</Tag><Tag>{stageLabel[focus.current_stage] || focus.current_stage}</Tag></div><Title level={4}>{focus.title}</Title>{focus.detail && <Text>{focus.detail}</Text>}<div className="focus-action-handoff"><span>责任：{focus.responsible_name === '我' ? '我' : `${roleLabel[focus.responsible_role] || focus.responsible_role} · ${focus.responsible_name}`}</span>{focus.action_hint && <span>下一步：{focus.action_hint}</span>}{focus.due_at && <span>截止：{fmtTime(focus.due_at)}</span>}</div></div><Button type="primary" size="large" icon={<ArrowRightOutlined />} onClick={() => open(focus)}>{actionLabel(focus)}</Button></div>
     </Card>}
+    {!focus && bucket === 'todo' && <Card className="focus-action-card focus-empty-card" title={<Space><CheckCircleOutlined /><span>当前没有待办，接下来可以做什么？</span></Space>}>
+      <div className="focus-empty-content"><div><Title level={4}>工作队列已清空</Title><Text type="secondary">可以从客户工作台继续推进业务，或查看历史记录和流程结果。</Text></div><Space wrap>{createButtons()}<Button icon={<FolderOpenOutlined />} onClick={() => onNavigate('/customers')}>查看客户工作台</Button></Space></div>
+    </Card>}
 
     <Card className="action-list-card" title="业务队列" extra={<Button type="text" onClick={load}>刷新</Button>}>
       <Segmented className="action-bucket-tabs" value={bucket} onChange={value => setBucket(value as Bucket)} options={(['todo', 'in_progress', 'draft', 'done'] as Bucket[]).map(value => ({ value, label: `${bucketCopy[value].label} (${items[value].length})` }))} />
-      {loading ? <div className="page-loading"><Spin /></div> : selected.length ? <List className="action-list" dataSource={selected} renderItem={item => <List.Item actions={[<Button key="open" type={bucket === 'todo' ? 'primary' : 'link'} onClick={() => open(item)}>{bucket === 'todo' ? actionLabel(item) : '查看详情'}{bucket === 'todo' && <ArrowRightOutlined />}</Button>]}><List.Item.Meta avatar={<span className={`action-kind action-kind-${item.source_type}`}>{item.source_type === 'credit' ? <SafetyCertificateOutlined /> : <FolderOpenOutlined />}</span>} title={<Space wrap><Text strong>{item.customer_name}</Text><Tag color={item.source_type === 'credit' ? 'cyan' : 'blue'}>{item.kind_label}</Tag><Tag>{stageLabel[item.current_stage] || item.current_stage}</Tag></Space>} description={<div className="action-list-copy"><Text strong>{item.title}</Text>{item.detail && <Text>{item.detail}</Text>}<Text type="secondary">责任：{item.responsible_name === '我' ? '我' : `${roleLabel[item.responsible_role] || item.responsible_role} · ${item.responsible_name}`}{item.due_at ? ` · 截止 ${fmtTime(item.due_at)}` : ''}</Text></div>} /></List.Item>} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<Space direction="vertical"><Text>{bucketCopy[bucket].empty}</Text>{bucket === 'todo' && <Space>{canCreateCredit && <Button type="primary" onClick={onCreateCredit}>发起客户信审</Button>}{canCreateContract && <Button onClick={onCreateContract}>发起合同审查</Button>}</Space>}</Space>} />}
+      {loading ? <div className="page-loading"><Spin /></div> : selected.length ? <List className="action-list" dataSource={selected} renderItem={item => { const meta = stageInfo(item.current_stage); return <List.Item actions={[<Button key="open" type={bucket === 'todo' ? 'primary' : 'link'} onClick={() => open(item)}>{bucket === 'todo' ? actionLabel(item) : '查看详情'}{bucket === 'todo' && <ArrowRightOutlined />}</Button>]}><List.Item.Meta avatar={<span className={`action-kind action-kind-${item.source_type}`}>{item.source_type === 'credit' ? <SafetyCertificateOutlined /> : <FolderOpenOutlined />}</span>} title={<Space wrap><Text strong>{item.customer_name}</Text><Tag color={item.source_type === 'credit' ? 'cyan' : 'blue'}>{item.kind_label}</Tag><Tag color={meta.color}>{meta.label}</Tag></Space>} description={<div className="action-list-copy"><Text strong>{item.title}</Text>{item.detail && <Text>{item.detail}</Text>}{item.action_hint && <Text className="action-list-next">下一步：{item.action_hint}</Text>}<Text type="secondary">责任：{item.responsible_name === '我' ? '我' : `${roleLabel[item.responsible_role] || item.responsible_role} · ${item.responsible_name}`}{item.due_at ? ` · 截止 ${fmtTime(item.due_at)}` : ''}</Text></div>} /></List.Item> }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<Space direction="vertical"><Text>{bucketCopy[bucket].empty}</Text>{bucket === 'todo' && <Space>{canCreateCredit && <Button type="primary" onClick={onCreateCredit}>发起客户信审</Button>}{canCreateContract && <Button onClick={onCreateContract}>发起合同审查</Button>}</Space>}</Space>} />}
     </Card>
   </div>
 }

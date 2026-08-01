@@ -3,12 +3,15 @@ import { Alert, AutoComplete, Button, Card, DatePicker, Form, Input, List, Selec
 import { ArrowLeftOutlined, ArrowRightOutlined, DeleteOutlined, FileAddOutlined, FileTextOutlined, SafetyCertificateOutlined, UploadOutlined } from '@ant-design/icons'
 import { api } from '../services/api'
 import type { CreditCase, CustomerWorkspace } from '../types'
+import TaskContextBanner from '../components/TaskContextBanner'
+import { useAuth } from '../context/AuthContext'
 
 type Props = { onCreated: (caseId: string) => void; initialCustomerKey?: string }
 const { Dragger } = Upload
 const { Text } = Typography
 
 export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
+  const { user } = useAuth()
   const [form] = Form.useForm()
   const [step, setStep] = useState(0)
   const [mainFile, setMainFile] = useState<File | null>(null)
@@ -103,6 +106,14 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
   }
   const customerOptions = useMemo(() => customers.map(customer => ({ value: customer.customer_name, label: <Space><span>{customer.customer_name}</span>{customer.latest_credit?.status === 'approved' ? <span className="customer-option-status">有效信审 V{customer.latest_credit.version}</span> : <span className="customer-option-status is-warning">暂无有效信审</span>}</Space> })), [customers])
   const selectedCredit = credits.find(item => item.case_id === selectedCreditId)
+  const selectedBusinessType = Form.useWatch('business_type', form) || '一般'
+  const businessTypeHint: Record<string, string> = {
+    '模塑一体': '重点确认交付前收款比例、质保和尾款条件；如低于制度底线，请准备对应特批依据。',
+    TKM: '重点确认走模前收款比例、尾期放账和尾期账期，相关特批材料建议与合同一起上传。',
+    TKP: '重点确认信用额度、账期、付款方式与已生效信审边界是否一致。',
+    '采购订单': '建议同时上传订单、报价或补充协议，便于系统核对金额、账期和收款条件。',
+    一般: '建议上传主合同及能说明交易背景、金额和付款条件的关联材料。',
+  }
   const creditLinkCopy = credits.length === 1
     ? `系统已自动关联唯一可用的信审版本 V${credits[0].version}`
     : credits.length > 1 && selectedCredit
@@ -110,6 +121,7 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
       : ''
 
   return <div className="review-request-page">
+    <TaskContextBanner role={user?.role} title="发起合同审查" description="先确认客户和已生效信审边界，再上传主合同；系统会自动把合同条件与信审边界、合同底线规则进行比对。" nextAction={credits.length ? '确认信审边界并上传合同' : '先完成客户信审'} />
     <Card title={<Space><FileAddOutlined />发起合同审查</Space>} extra={step === 2 ? <Button type="primary" loading={busy} onClick={submit}>创建案件并提交审查</Button> : null}>
       <Steps className="review-request-steps" current={step} responsive items={[{ title: '选择客户' }, { title: '确认信审' }, { title: '上传合同' }]} />
       <Form form={form} layout="vertical" preserve initialValues={{ business_type: '一般', priority: 'normal' }} className="review-request-form" onValuesChange={changed => { if (Object.prototype.hasOwnProperty.call(changed, 'customer_name')) setCustomerName(String(changed.customer_name || '').trim()); if (Object.prototype.hasOwnProperty.call(changed, 'credit_case_id')) setCreditCaseId(String(changed.credit_case_id || '').trim()) }}>
@@ -124,6 +136,7 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
 
         {step === 1 && <section className="request-step-panel">
           <Typography.Title level={4}>合同信息与信审边界</Typography.Title>
+          <Alert type="info" showIcon message={`当前业务类型：${selectedBusinessType}`} description={businessTypeHint[selectedBusinessType] || businessTypeHint['一般']} style={{ marginBottom: 16 }} />
           {!credits.length && <Alert type="warning" showIcon style={{ marginBottom: 16 }} message="没有可绑定的有效信审" />}
           <div className="review-meta-grid case-create-grid">
             <Form.Item name="credit_case_id" label={credits.length === 1 ? '系统自动关联的信审版本' : '系统推荐的信审版本'} rules={[{ required: true, message: '必须绑定已生效信审版本' }]}><Select placeholder="选择客户已生效的信审版本" options={credits.map(item => ({ value: item.case_id, label: `V${item.version} · 账期≤${item.conditions.max_payment_days}天 · 额度≤${item.conditions.max_credit_amount.toLocaleString()} ${item.conditions.currency}` }))} dropdownRender={menu => <><Button type="link" icon={<SafetyCertificateOutlined />} onClick={() => loadCredits()}>刷新信审版本</Button>{menu}</>} /></Form.Item>
@@ -137,6 +150,7 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
 
         {step === 2 && <section className="request-step-panel">
           <Typography.Title level={4}>上传合同文件</Typography.Title>
+          <Alert type="info" showIcon message="建议一起上传能说明交易条件的关联材料" description="主合同必传；订单、报价、补充协议、特批邮件、客户承诺函等材料可帮助系统更准确地识别金额、账期、付款和例外依据。" style={{ marginBottom: 16 }} />
           <div className="document-upload-grid">
             <div><Text strong>主合同 <Text type="danger">（必传，仅 1 份）</Text></Text><Dragger className="main-contract-uploader" multiple={false} showUploadList={false} disabled={busy} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.bmp" beforeUpload={file => { setMainFile(file as File); return false }}><p className="ant-upload-drag-icon"><FileTextOutlined /></p><p className="ant-upload-text">{mainFile ? mainFile.name : '拖入或选择主合同'}</p></Dragger>{mainFile && <List size="small" bordered dataSource={[mainFile]} renderItem={file => <List.Item actions={[<Button key="remove" type="link" danger icon={<DeleteOutlined />} onClick={() => setMainFile(null)}>移除</Button>]}><List.Item.Meta avatar={<FileTextOutlined />} title={file.name} description={`${(file.size / 1024).toFixed(1)} KB · 主合同`} /></List.Item>} />}</div>
             <div><Text strong>关联材料 <Text type="secondary">（可选）</Text></Text><Dragger className="annex-uploader" multiple showUploadList={false} disabled={busy} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.bmp" beforeUpload={file => addAttachment(file as File)}><p className="ant-upload-drag-icon"><UploadOutlined /></p><p className="ant-upload-text">上传关联材料</p></Dragger>{attachments.length > 0 && <List size="small" bordered dataSource={attachments} renderItem={file => <List.Item actions={[<Button key="remove" type="link" danger icon={<DeleteOutlined />} onClick={() => setAttachments(files => files.filter(item => item !== file))}>移除</Button>]}><List.Item.Meta avatar={<FileTextOutlined />} title={file.name} description={`${(file.size / 1024).toFixed(1)} KB · 关联材料`} /></List.Item>} />}</div>

@@ -792,6 +792,37 @@ def resubmit_credit_case(case_id: str, actor: dict) -> dict:
         c.execute("UPDATE credit_cases SET status='draft',assigned_to=?,updated_at=? WHERE case_id=?", (_role_assignee(c, 'reviewer'), time.time(), case_id))
     return get_credit_case(case_id)
 
+def delete_historical_credit_case(case_id: str) -> dict:
+    """Permanently remove a terminal, unreferenced credit case and its artifacts."""
+    init_db()
+    with _lock, _conn() as c:
+        row = c.execute('SELECT * FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
+        if not row:
+            raise ValueError('信审案件不存在')
+        item = _credit_case(row)
+        if item['status'] not in {'superseded', 'rejected'}:
+            raise ValueError('仅已被新版本替代或已拒绝的历史信审案件可以删除')
+        linked_case = c.execute('SELECT case_id FROM contract_cases WHERE credit_case_id=? LIMIT 1', (case_id,)).fetchone()
+        if linked_case:
+            raise ValueError(f'该信审案件仍被合同案件 {linked_case["case_id"]} 绑定，请先删除该历史合同案件')
+        document_paths = [entry['stored_path'] for entry in c.execute('SELECT stored_path FROM credit_documents WHERE case_id=?', (case_id,))]
+        assessment_ids = [entry['assessment_id'] for entry in c.execute('SELECT assessment_id FROM credit_assessments WHERE case_id=?', (case_id,))]
+        if assessment_ids:
+            placeholders = ','.join('?' for _ in assessment_ids)
+            c.execute(f'DELETE FROM credit_evidence WHERE assessment_id IN ({placeholders})', assessment_ids)
+        c.execute('DELETE FROM credit_document_text_assets WHERE document_id IN (SELECT document_id FROM credit_documents WHERE case_id=?)', (case_id,))
+        c.execute('DELETE FROM credit_documents WHERE case_id=?', (case_id,))
+        c.execute('DELETE FROM credit_exposure_snapshots WHERE case_id=?', (case_id,))
+        c.execute('DELETE FROM credit_assessments WHERE case_id=?', (case_id,))
+        c.execute('DELETE FROM credit_cases WHERE case_id=?', (case_id,))
+    for path in set(filter(None, document_paths)):
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+    return {'case_id': case_id, 'customer_name': item['customer_name'], 'version': item['version'], 'status': item['status'], 'deleted_documents': len(document_paths)}
+
 def require_active_credit_case(case_id: str) -> dict:
     item = get_credit_case(case_id)
     if not item:
@@ -1359,6 +1390,48 @@ def get_case_center(case_id: str, actor: dict | None=None) -> dict | None:
             item['responsible_name'] = ROLE_DISPLAY.get(role, '系统')
         item['events'] = [dict(event) for event in c.execute('SELECT * FROM case_events WHERE case_id=? ORDER BY created_at DESC LIMIT 100', (case_id,))]
         return item
+
+def delete_historical_contract_case(case_id: str) -> dict:
+    """Permanently remove a closed contract case, its review records, and stored files."""
+    init_db()
+    with _lock, _conn() as c:
+        row = c.execute('SELECT case_id,customer_name,current_stage FROM contract_cases WHERE case_id=?', (case_id,)).fetchone()
+        if not row:
+            raise ValueError('合同案件不存在')
+        if row['current_stage'] not in {'archived', 'cancelled'}:
+            raise ValueError('仅已归档或已取消的历史合同案件可以删除')
+        job_ids = {entry['job_id'] for entry in c.execute('SELECT job_id FROM case_documents WHERE case_id=? AND job_id IS NOT NULL', (case_id,))}
+        job_ids.update(entry['id'] for entry in c.execute('SELECT id FROM reviews WHERE case_id=?', (case_id,)))
+        file_paths: list[str] = []
+        if job_ids:
+            job_list = sorted(job_ids)
+            placeholders = ','.join('?' for _ in job_list)
+            file_paths.extend(entry['file_path'] for entry in c.execute(f'SELECT file_path FROM reviews WHERE id IN ({placeholders})', job_list))
+            file_paths.extend(entry['stored_path'] for entry in c.execute(f'SELECT stored_path FROM material_files WHERE job_id IN ({placeholders})', job_list))
+            file_paths.extend(entry['output_path'] for entry in c.execute(f'SELECT output_path FROM export_snapshots WHERE job_id IN ({placeholders})', job_list))
+            file_paths.extend(entry['stored_path'] for entry in c.execute(f'SELECT stored_path FROM case_attachments WHERE job_id IN ({placeholders})', job_list))
+            c.execute(f'DELETE FROM review_actions WHERE finding_id IN (SELECT finding_id FROM review_findings WHERE job_id IN ({placeholders}))', job_list)
+            c.execute(f'DELETE FROM finding_approvals WHERE job_id IN ({placeholders})', job_list)
+            c.execute(f'DELETE FROM material_files WHERE job_id IN ({placeholders})', job_list)
+            c.execute(f'DELETE FROM material_requests WHERE job_id IN ({placeholders})', job_list)
+            c.execute(f'DELETE FROM export_snapshots WHERE job_id IN ({placeholders})', job_list)
+            c.execute(f'DELETE FROM contract_versions WHERE job_id IN ({placeholders}) OR parent_job_id IN ({placeholders})', job_list * 2)
+            c.execute(f'DELETE FROM translations WHERE job_id IN ({placeholders})', job_list)
+            c.execute(f'DELETE FROM case_attachments WHERE job_id IN ({placeholders})', job_list)
+            c.execute(f'DELETE FROM review_findings WHERE job_id IN ({placeholders})', job_list)
+            c.execute(f'DELETE FROM mask_mappings WHERE task_id IN ({placeholders})', job_list)
+            c.execute(f'DELETE FROM reviews WHERE id IN ({placeholders})', job_list)
+        c.execute('DELETE FROM case_documents WHERE case_id=?', (case_id,))
+        c.execute('DELETE FROM workflow_tasks WHERE case_id=?', (case_id,))
+        c.execute('DELETE FROM case_events WHERE case_id=?', (case_id,))
+        c.execute('DELETE FROM contract_cases WHERE case_id=?', (case_id,))
+    for path in set(filter(None, file_paths)):
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+    return {'case_id': case_id, 'customer_name': row['customer_name'], 'stage': row['current_stage'], 'deleted_reviews': len(job_ids)}
 
 def _case_for_job(job_id: str) -> str | None:
     with _lock, _conn() as c:
@@ -1936,6 +2009,40 @@ def purge_knowledge_by_source(source_clause: str):
     with _lock, _conn() as c:
         c.execute('DELETE FROM clause_knowledge WHERE source_clause=?', (source_clause,))
 
+def _version_field_changes(baseline_fields: dict | None, current_fields: dict | None):
+    """Return the small set of commercial fields that an approver needs to compare.
+
+    The report already stores these fields as structured values.  Keeping the
+    comparison at the report boundary makes the UI useful even when the
+    original files are no longer available, and avoids sending full encrypted
+    reports to the browser just to render a revision summary.
+    """
+    baseline = baseline_fields or {}
+    current = current_fields or {}
+    baseline_parties = baseline.get('parties') or {}
+    current_parties = current.get('parties') or {}
+    specs = [
+        ('business_type', '业务类型', baseline.get('business_type'), current.get('business_type')),
+        ('our_party', '我方立场', baseline.get('our_party'), current.get('our_party')),
+        ('party_a', '甲方', baseline_parties.get('甲方'), current_parties.get('甲方')),
+        ('party_b', '乙方', baseline_parties.get('乙方'), current_parties.get('乙方')),
+        ('validity_years', '合同有效期（年）', baseline.get('validity_years'), current.get('validity_years')),
+        ('total_amount', '交易金额', baseline.get('total_amount'), current.get('total_amount')),
+        ('currency', '币种', baseline.get('currency'), current.get('currency')),
+        ('payment_terms', '付款节点', baseline.get('payment_terms'), current.get('payment_terms')),
+    ]
+    changes = []
+    for key, label, before, after in specs:
+        # Treat numeric strings and numbers as the same value.  All other
+        # values remain text so the comparison stays deterministic.
+        try:
+            same = float(before) == float(after) if before not in (None, '') and after not in (None, '') else before == after
+        except (TypeError, ValueError):
+            same = str(before or '') == str(after or '')
+        changes.append({'key': key, 'label': label, 'baseline': before, 'current': after, 'changed': not same})
+    return changes
+
+
 def compare_reviews(job_id: str, baseline_job_id: str):
     current = get_review(job_id)
     baseline = get_review(baseline_job_id)
@@ -1946,13 +2053,38 @@ def compare_reviews(job_id: str, baseline_job_id: str):
     current_clauses = {x.get('id'): x.get('text', '') for x in current.get('report', {}).get('clauses', [])}
     baseline_clauses = {x.get('id'): x.get('text', '') for x in baseline.get('report', {}).get('clauses', [])}
     changed = [key for key in sorted(set(current_clauses) | set(baseline_clauses)) if current_clauses.get(key) != baseline_clauses.get(key)]
+    current_report = current.get('report', {}) or {}
+    baseline_report = baseline.get('report', {}) or {}
+    resolved_rules = sorted(baseline_rules - current_rules)
+    new_rules = sorted(current_rules - baseline_rules)
+    persisting_rules = sorted(current_rules & baseline_rules)
     result = {
         'job_id': job_id, 'baseline_job_id': baseline_job_id,
-        'new_risks': sorted(current_rules - baseline_rules),
-        'resolved_risks': sorted(baseline_rules - current_rules),
-        'persisting_risks': sorted(current_rules & baseline_rules),
+        'new_risks': new_rules,
+        'resolved_risks': resolved_rules,
+        'persisting_risks': persisting_rules,
         'changed_clauses': changed,
-        'review_scope': current.get('report', {}).get('review_scope', {}),
+        'review_scope': current_report.get('review_scope', {}),
+        'current': {
+            'filename': current.get('filename') or current_report.get('filename', ''),
+            'summary': current_report.get('summary', {}),
+            'contract_fields': current_report.get('contract_fields', {}),
+            'credit_decision': current_report.get('credit_decision'),
+        },
+        'baseline': {
+            'filename': baseline.get('filename') or baseline_report.get('filename', ''),
+            'summary': baseline_report.get('summary', {}),
+            'contract_fields': baseline_report.get('contract_fields', {}),
+            'credit_decision': baseline_report.get('credit_decision'),
+        },
+        'risk_counts': {
+            'baseline': len(baseline_report.get('risks') or []),
+            'current': len(current_report.get('risks') or []),
+            'resolved': len(resolved_rules),
+            'new': len(new_rules),
+            'persisting': len(persisting_rules),
+        },
+        'field_changes': _version_field_changes(baseline_report.get('contract_fields'), current_report.get('contract_fields')),
     }
     with _lock, _conn() as c:
         c.execute('UPDATE contract_versions SET parent_job_id=?,compare_json=? WHERE job_id=?',

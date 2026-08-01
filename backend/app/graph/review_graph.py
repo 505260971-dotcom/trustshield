@@ -456,7 +456,30 @@ def build_graph():
     g.add_edge('judge', 'enforce'); g.add_edge('enforce', 'summary'); g.add_edge('summary', END)
     return g.compile()
 
-def run_review(path, on_step=None, business_type_hint='', rule_snapshot=None, parent_report=None):
+def _review_event_sources(state):
+    """Expose only source-bound snippets for the live reviewer workspace."""
+    sources = {}
+    for item in state.get('infer') or []:
+        if not item:
+            continue
+        for evidence in (item.get('evidence_map') or {}).values():
+            quote = str(evidence or '').strip()
+            key = f"{item.get('clause_id') or ''}:{item.get('source_ref') or ''}:{quote}"
+            sources[key] = {
+                'clause_id': item.get('clause_id'), 'source_ref': item.get('source_ref', ''),
+                'page': item.get('page'), 'evidence_quote': quote[:500],
+            }
+    for risk in state.get('risks') or []:
+        quote = str(risk.get('evidence') or '').strip()
+        key = f"{risk.get('clause_id') or ''}:{risk.get('source_ref') or ''}:{quote}"
+        sources[key] = {
+            'clause_id': risk.get('clause_id'), 'source_ref': risk.get('source_ref', ''),
+            'page': risk.get('page'), 'evidence_quote': quote[:500], 'rule_id': risk.get('rule_id', ''),
+        }
+    return list(sources.values())[-120:]
+
+
+def run_review(path, on_step=None, business_type_hint='', rule_snapshot=None, parent_report=None, on_event=None):
     app = build_graph()
     rules = rule_snapshot or RULES
     rules_by_id = {rule['id']: rule for rule in rules}
@@ -469,6 +492,15 @@ def run_review(path, on_step=None, business_type_hint='', rule_snapshot=None, pa
         for s in new[len(seed := seen):]:
             seen.append(s)
             if on_step: on_step(s)
+            if on_event:
+                try:
+                    on_event({'type': 'agent_update', 'message': s, 'step_index': len(seen),
+                              'clause_count': len(ev.get('clauses') or []),
+                              'reviewed_count': sum(1 for item in ev.get('infer') or [] if item and not item.get('skipped')),
+                              'risk_count': len(ev.get('risks') or []),
+                              'sources': _review_event_sources(ev)})
+                except Exception:
+                    pass
         last = ev
     return assemble_report(last, path)
 

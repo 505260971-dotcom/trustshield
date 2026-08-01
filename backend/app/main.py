@@ -35,6 +35,8 @@ app.include_router(auth_router)
 JOBS: dict[str, dict] = {}
 TJOBS: dict[str, dict] = {}
 CREDIT_JOBS: dict[str, dict] = {}
+REVIEW_JOB_LOCK = threading.RLock()
+CREDIT_JOB_LOCK = threading.RLock()
 ALLOWED_CONTRACT = {'.docx','.pdf','.txt','.xlsx','.xls','.png','.jpg','.jpeg','.webp','.bmp'}
 ALLOWED_ATTACHMENT = ALLOWED_CONTRACT
 EXPORT_MODES = {'revised', 'plain', 'bilingual'}
@@ -48,6 +50,91 @@ def _assert_credit_access(case_id: str, user: dict) -> dict:
     if user.get('role') == 'business' and item.get('created_by') != user.get('id'):
         raise HTTPException(403, '无权访问该信审案件')
     return item
+
+
+def _publish_credit_event(assessment_id: str, event: dict) -> None:
+    """Publish a small, browser-safe progress event for a running assessment.
+
+    Credit assessments run in a daemon thread.  The event log is deliberately
+    kept in short-lived memory: the encrypted assessment report remains the
+    source of record, while this log lets a reviewer follow the same run before
+    the final report has been persisted.
+    """
+    with CREDIT_JOB_LOCK:
+        job = CREDIT_JOBS.get(assessment_id)
+        if not job:
+            return
+        job['event_seq'] = int(job.get('event_seq') or 0) + 1
+        item = {
+            'event_id': f'{assessment_id}:{job["event_seq"]}',
+            'created_at': time.time(),
+            **(event or {}),
+        }
+        job.setdefault('events', []).append(item)
+        event_type = str(item.get('type') or '')
+        if event_type in {'agent_action', 'tool_result', 'claim_validated'}:
+            job['active'] = {
+                'type': event_type,
+                'message': item.get('message') or item.get('result_summary') or item.get('reason_summary') or '',
+                'step': item.get('step'),
+                'tool': item.get('tool'),
+                'updated_at': item['created_at'],
+            }
+        for source in item.get('sources') or []:
+            source_id = str(source.get('chunk_id') or '')
+            if not source_id:
+                continue
+            existing = {str(row.get('chunk_id') or ''): row for row in job.setdefault('live_evidence', [])}
+            existing[source_id] = source
+            job['live_evidence'] = list(existing.values())[-120:]
+        for claim in item.get('claims') or []:
+            claim_id = str(claim.get('claim_id') or '')
+            if not claim_id:
+                continue
+            existing = {str(row.get('claim_id') or ''): row for row in job.setdefault('live_claims', [])}
+            existing[claim_id] = claim
+            job['live_claims'] = list(existing.values())[-80:]
+
+
+def _publish_credit_step(assessment_id: str, step: str) -> None:
+    with CREDIT_JOB_LOCK:
+        job = CREDIT_JOBS.get(assessment_id)
+        if not job:
+            return
+        job.setdefault('steps', []).append(str(step))
+    _publish_credit_event(assessment_id, {'type': 'milestone', 'message': str(step)})
+
+
+def _publish_review_event(job_id: str, event: dict) -> None:
+    """Publish live, source-bound contract review progress to the UI."""
+    with REVIEW_JOB_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        job['event_seq'] = int(job.get('event_seq') or 0) + 1
+        item = {'event_id': f'{job_id}:{job["event_seq"]}', 'created_at': time.time(), **(event or {})}
+        job.setdefault('events', []).append(item)
+        if item.get('type') in {'agent_update', 'milestone', 'error', 'completed'}:
+            job['active'] = {
+                'type': item.get('type'), 'message': item.get('message') or '',
+                'step_index': item.get('step_index'), 'updated_at': item['created_at'],
+            }
+        for source in item.get('sources') or []:
+            source_id = f"{source.get('clause_id') or ''}:{source.get('source_ref') or ''}:{source.get('evidence_quote') or ''}"
+            if not source_id.strip(':'):
+                continue
+            existing = {f"{row.get('clause_id') or ''}:{row.get('source_ref') or ''}:{row.get('evidence_quote') or ''}": row
+                        for row in job.setdefault('live_evidence', [])}
+            existing[source_id] = source
+            job['live_evidence'] = list(existing.values())[-120:]
+
+
+def _publish_review_step(job_id: str, step: str) -> None:
+    with REVIEW_JOB_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        job.setdefault('steps', []).append(str(step))
 
 @app.on_event('startup')
 def _startup():
@@ -214,6 +301,16 @@ async def credit_case_resubmit(case_id: str, user=Depends(require('credit:create
     store.audit(user, 'credit.resubmit', 'credit_case', case_id)
     return result
 
+@app.delete('/api/credit/cases/{case_id}')
+async def credit_case_delete(case_id: str, user=Depends(require('admin:cases'))):
+    try:
+        result = store.delete_historical_credit_case(case_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit(user, 'credit.delete_historical', 'credit_case', case_id,
+                {'customer': result['customer_name'], 'version': result['version'], 'status': result['status'], 'permanent': True})
+    return {'deleted': True, **result}
+
 
 @app.get('/api/credit/model')
 async def credit_model(user=Depends(require('credit:read'))):
@@ -224,6 +321,44 @@ async def credit_model(user=Depends(require('credit:read'))):
 async def credit_documents(case_id: str, user=Depends(require('credit:read'))):
     _assert_credit_access(case_id, user)
     return {'items': store.list_credit_documents(case_id)}
+
+
+@app.get('/api/credit/cases/{case_id}/documents/{document_id}/preview')
+async def credit_document_preview(case_id: str, document_id: str, user=Depends(require('credit:read'))):
+    """Return normalized source records for the evidence comparison pane.
+
+    The browser receives source-bound text records, not an internal storage
+    path.  Each record retains the parser's stable source_ref and page/table
+    metadata so Agent evidence can be highlighted without guessing offsets in
+    a DOCX, PDF, spreadsheet, or OCR result.
+    """
+    _assert_credit_access(case_id, user)
+    item = store.get_credit_document(case_id, document_id)
+    if not item:
+        raise HTTPException(404, '信审材料不存在')
+    asset = store.get_credit_document_text_asset(document_id, item.get('content_hash') or '')
+    records = (asset or {}).get('records') or []
+    status = (asset or {}).get('status') or item.get('text_status') or 'pending'
+    error = (asset or {}).get('error') or item.get('text_error') or ''
+    # Historical uploads may predate encrypted text assets.  Parse them lazily
+    # so the new preview remains useful without changing the stored original.
+    if asset is None and os.path.isfile(item.get('stored_path') or ''):
+        try:
+            records = await asyncio.to_thread(read_paragraphs, item['stored_path'])
+            status = text_asset_status(records)
+        except Exception as exc:
+            status = 'failed'
+            error = str(exc)[:500]
+    public_document = {key: value for key, value in item.items() if key != 'stored_path'}
+    public_document['text_record_count'] = len(records)
+    store.audit(user, 'credit.document_preview', 'credit_document', document_id, {'case_id': case_id, 'record_count': len(records)})
+    return {
+        'document': public_document,
+        'records': records,
+        'status': status,
+        'error': error,
+        'total': len(records),
+    }
 
 
 @app.post('/api/credit/cases/{case_id}/documents')
@@ -295,8 +430,8 @@ def _run_credit_assessment(assessment_id: str):
         # ``run_credit_assessment`` can legitimately spend longer than one UI
         # polling window in its first remote ReAct turn.  Publish an immediate
         # heartbeat so an empty step list is never mistaken for a dead worker.
-        job['steps'].append('任务已启动：正在载入信审材料与 CRM/ERP 敞口快照')
-        job['steps'].append('正在执行生产 ReAct Agent；单轮模型调用最长可能等待 45 秒')
+        _publish_credit_step(assessment_id, '任务已启动：正在载入信审材料与 CRM/ERP 敞口快照')
+        _publish_credit_step(assessment_id, '正在执行生产 ReAct Agent；单轮模型调用最长可能等待 45 秒')
         from .graph.credit_graph import run_credit_assessment
         case = store.get_credit_case(job['case_id'])
         documents = [store.get_credit_document(job['case_id'], item['document_id']) for item in store.list_credit_documents(job['case_id'])]
@@ -304,16 +439,21 @@ def _run_credit_assessment(assessment_id: str):
         exposure = store.latest_credit_exposure_snapshot(job['case_id'])
         report, evidence = run_credit_assessment(
             case, documents, (exposure or {}).get('payload'), store.get_credit_model(job['model_version']),
-            on_step=lambda step: CREDIT_JOBS[assessment_id]['steps'].append(step),
+            on_step=lambda step: _publish_credit_step(assessment_id, step),
+            on_event=lambda event: _publish_credit_event(assessment_id, event),
         )
         completed = store.finish_credit_assessment(assessment_id, report, evidence)
-        job.update(status='done', result=completed)
+        with CREDIT_JOB_LOCK:
+            job.update(status='done', result=completed)
+        _publish_credit_event(assessment_id, {'type': 'completed', 'message': '信审 Agent 已完成，正在固化评估快照'})
     except Exception as exc:
         try:
             store.finish_credit_assessment(assessment_id, None, [], str(exc))
         except Exception:
             pass
-        job.update(status='error', error=str(exc)[:1000])
+        with CREDIT_JOB_LOCK:
+            job.update(status='error', error=str(exc)[:1000])
+        _publish_credit_event(assessment_id, {'type': 'error', 'message': str(exc)[:500]})
 
 
 @app.post('/api/credit/cases/{case_id}/assessments')
@@ -325,10 +465,13 @@ async def credit_assessment_start(case_id: str, body: dict | None=None, user=Dep
         assessment = store.start_credit_assessment(case_id, user, str((body or {}).get('model_version') or ''))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    CREDIT_JOBS[assessment['assessment_id']] = {
-        'status': 'running', 'case_id': case_id, 'model_version': assessment['model_version'],
-        'steps': [], 'result': None, 'error': '', 'started_at': time.time(),
-    }
+    with CREDIT_JOB_LOCK:
+        CREDIT_JOBS[assessment['assessment_id']] = {
+            'status': 'running', 'case_id': case_id, 'model_version': assessment['model_version'],
+            'steps': [], 'events': [], 'live_evidence': [], 'live_claims': [],
+            'active': {'type': 'starting', 'message': '正在准备信审材料'},
+            'event_seq': 0, 'result': None, 'error': '', 'started_at': time.time(),
+        }
     threading.Thread(target=_run_credit_assessment, args=(assessment['assessment_id'],), daemon=True).start()
     store.audit(user, 'credit.assessment_start', 'credit_assessment', assessment['assessment_id'], {'case_id': case_id, 'model_version': assessment['model_version']})
     return assessment
@@ -389,13 +532,24 @@ async def credit_assessment_get(case_id: str, assessment_id: str, user=Depends(r
 @app.get('/api/credit/cases/{case_id}/assessments/{assessment_id}/status')
 async def credit_assessment_status(case_id: str, assessment_id: str, user=Depends(require('credit:read'))):
     _assert_credit_access(case_id, user)
-    job = CREDIT_JOBS.get(assessment_id)
-    if job and job.get('case_id') == case_id:
-        return {key: value for key, value in job.items() if key != 'result'}
+    with CREDIT_JOB_LOCK:
+        job = CREDIT_JOBS.get(assessment_id)
+        if job and job.get('case_id') == case_id:
+            return {key: value for key, value in job.items() if key != 'result'}
     result = store.get_credit_assessment(assessment_id)
     if not result or result.get('case_id') != case_id:
         raise HTTPException(404, '信审评估不存在')
-    return {'status': result['status'], 'steps': (result.get('report') or {}).get('steps', []), 'error': result.get('error', '')}
+    runtime = (result.get('report') or {}).get('audit_runtime') or {}
+    return {
+        'status': result['status'],
+        'steps': (result.get('report') or {}).get('steps', []),
+        'events': [],
+        'trace': runtime.get('trace') or [],
+        'live_evidence': runtime.get('evidence_sources') or [],
+        'live_claims': runtime.get('claims') or [],
+        'active': {'type': result['status'], 'message': '已载入最近一次信审运行结果'},
+        'error': result.get('error', ''),
+    }
 
 
 @app.post('/api/credit/cases/{case_id}/assessments/{assessment_id}/apply')
@@ -491,6 +645,16 @@ async def case_center_detail(case_id: str, user=Depends(current_user)):
         raise HTTPException(404, '案件不存在')
     return result
 
+@app.delete('/api/case-center/cases/{case_id}')
+async def case_center_delete(case_id: str, user=Depends(require('admin:cases'))):
+    try:
+        result = store.delete_historical_contract_case(case_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit(user, 'case.delete_historical', 'case', case_id,
+                {'customer': result['customer_name'], 'stage': result['stage'], 'permanent': True})
+    return {'deleted': True, **result}
+
 @app.post('/api/case-center/cases/{case_id}/actions/{action}')
 async def case_center_action(case_id: str, action: str, body: dict, user=Depends(current_user)):
     try:
@@ -524,8 +688,14 @@ def _assert_case_access(job_id: str, user: dict):
 def _run(path: str, job_id: str, created_at: float):
     job=JOBS[job_id]
     try:
+        _publish_review_step(job_id, '任务已启动：正在读取合同文件与已绑定信审边界')
         from .graph.review_graph import run_review
-        report=run_review(path,on_step=lambda s:JOBS[job_id]['steps'].append(s),business_type_hint=job.get('business_type',''),rule_snapshot=job.get('rule_snapshot'),parent_report=job.get('parent_report'))
+        report=run_review(
+            path, on_step=lambda step: _publish_review_step(job_id, step),
+            on_event=lambda event: _publish_review_event(job_id, event),
+            business_type_hint=job.get('business_type',''), rule_snapshot=job.get('rule_snapshot'),
+            parent_report=job.get('parent_report'),
+        )
         credit_case = job['credit_case']
         exposure = store.latest_credit_exposure_snapshot(credit_case['case_id'])
         credit_risks = [
@@ -546,16 +716,22 @@ def _run(path: str, job_id: str, created_at: float):
             summary['mid'] = sum(1 for item in report['risks'] if item.get('severity') == 'mid')
             summary['low'] = sum(1 for item in report['risks'] if item.get('severity') == 'low')
             summary['overall_level'] = '信审阻断·须先更新信审条件'
-            report['steps'].append(f'信审前置校验: 绑定 {credit_case["customer_name"]} / V{credit_case["version"]}，发现 {len(credit_risks)} 项越界')
+            step = f'信审前置校验: 绑定 {credit_case["customer_name"]} / V{credit_case["version"]}，发现 {len(credit_risks)} 项越界'
+            report['steps'].append(step); _publish_review_step(job_id, step)
         else:
-            report['steps'].append(f'信审前置校验: 绑定 {credit_case["customer_name"]} / V{credit_case["version"]}，合同未突破已生效条件')
+            step = f'信审前置校验: 绑定 {credit_case["customer_name"]} / V{credit_case["version"]}，合同未突破已生效条件'
+            report['steps'].append(step); _publish_review_step(job_id, step)
         report['_created_at']=created_at; report['_path']=path; report['filename']=job.get('filename') or report.get('filename','')
         mapping=report.pop('_mask_mapping',{})
         store.save_review(job_id,report,status='done',actor=job['actor'],mapping=mapping,rule_version=job['rule_version'],rules_by_id=job['rules_by_id'])
-        job['result']=_safe_result(report); job['status']='done'
+        with REVIEW_JOB_LOCK:
+            job['result']=_safe_result(report); job['status']='done'
+        _publish_review_event(job_id, {'type': 'completed', 'message': '合同审查已完成，正在固化风险与门禁结果'})
         store.audit(job['actor'],'review.complete','review',job_id,{'risks':report.get('summary',{}).get('n_risks',0)})
     except Exception as e:
-        job['status']='error'; job['error']=str(e)
+        with REVIEW_JOB_LOCK:
+            job['status']='error'; job['error']=str(e)
+        _publish_review_event(job_id, {'type': 'error', 'message': str(e)[:500]})
         try: store.save_review(job_id,{'filename':job.get('filename',''),'summary':{}},status='error',error=str(e),actor=job['actor'])
         except Exception: pass
         store.audit(job['actor'],'review.error','review',job_id,{'error':str(e)[:300]})
@@ -600,7 +776,12 @@ async def case_document_review(case_id: str, file: UploadFile=File(...), busines
         if not parent or parent.get('status') != 'done': raise HTTPException(400, '上一版本尚未完成，不能增量复审')
         parent_report = parent.get('report') or {}
     resolved_case_id=store.create_pending(job_id,file.filename,path,user,business_type,parent_job_id=parent_job_id,rule_version=catalog['version'],credit_case=credit_case,case_id=case_id,document_role=document_role,**metadata)
-    JOBS[job_id]={'status':'running','steps':[],'result':None,'path':path,'filename':file.filename,'actor':user,'case_id':resolved_case_id,'business_type':business_type,'rule_version':catalog['version'],'rule_snapshot':catalog['rules'],'rules_by_id':{rule['id']:rule for rule in catalog['rules']},'parent_report':parent_report,'credit_case':credit_case}
+    with REVIEW_JOB_LOCK:
+        JOBS[job_id]={'status':'running','steps':[],'events':[],'live_evidence':[],
+                      'active':{'type':'starting','message':'正在准备合同审查'},'event_seq':0,
+                      'result':None,'path':path,'filename':file.filename,'actor':user,'case_id':resolved_case_id,
+                      'business_type':business_type,'rule_version':catalog['version'],'rule_snapshot':catalog['rules'],
+                      'rules_by_id':{rule['id']:rule for rule in catalog['rules']},'parent_report':parent_report,'credit_case':credit_case}
     threading.Thread(target=_run,args=(path,job_id,created),daemon=True).start()
     store.audit(user,'review.create','case',resolved_case_id,{'job_id':job_id,'filename':file.filename})
     return {'job_id':job_id,'case_id':resolved_case_id}
@@ -608,22 +789,78 @@ async def case_document_review(case_id: str, file: UploadFile=File(...), busines
 @app.get('/api/reviews/{job_id}/status')
 async def job_status(job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
-    j=JOBS.get(job_id)
-    if j:return {k:v for k,v in j.items() if k not in {'actor','path'}}
+    with REVIEW_JOB_LOCK:
+        j=JOBS.get(job_id)
+        if j:
+            return {k:v for k,v in j.items() if k not in {'actor','path','rule_snapshot','rules_by_id','parent_report','credit_case'}}
     rec=store.get_review(job_id)
     if not rec: raise HTTPException(404,'任务不存在')
-    return {'status':rec['status'],'steps':[],'result':rec['report'],'case_id':rec.get('case_id')}
+    report = rec.get('report') or {}
+    sources = []
+    for item in (report.get('risks') or []) + (report.get('review_hints') or []):
+        sources.append({'clause_id': item.get('clause_id'), 'source_ref': item.get('source_ref', ''),
+                        'page': item.get('page'), 'evidence_quote': item.get('evidence', ''), 'rule_id': item.get('rule_id', '')})
+    return {
+        'status':rec['status'], 'steps':report.get('steps') or [],
+        'events':[{'type':'agent_update','message':step,'step_index':index + 1} for index, step in enumerate(report.get('steps') or [])],
+        'live_evidence':sources, 'active':{'type':rec['status'],'message':'已载入最近一次合同审查结果'},
+        'result':report, 'case_id':rec.get('case_id'), 'error':rec.get('error',''),
+    }
+
+
+@app.get('/api/reviews/{job_id}/preview')
+async def review_preview(job_id: str, user=Depends(require('review:read'))):
+    """Return source records for the contract evidence comparison pane."""
+    _assert_case_access(job_id, user)
+    rec = store.get_review(job_id)
+    if not rec:
+        raise HTTPException(404, '任务不存在')
+    path = rec.get('file_path') or (JOBS.get(job_id) or {}).get('path') or ''
+    records = []
+    error = ''
+    if path and os.path.isfile(path):
+        try:
+            records = await asyncio.to_thread(read_paragraphs, path)
+        except Exception as exc:
+            error = str(exc)[:500]
+    if not records:
+        # A completed report remains previewable even when the original file
+        # has been moved out of the upload directory by an external archive.
+        for clause in (rec.get('report') or {}).get('clauses') or []:
+            records.append({
+                'text': clause.get('text', ''), 'source_ref': clause.get('source_ref', ''),
+                'source_kind': 'clause', 'start_page': clause.get('start_page') or clause.get('page') or 1,
+                'end_page': clause.get('end_page') or clause.get('page') or 1,
+            })
+    store.audit(user, 'review.document_preview', 'review', job_id, {'record_count': len(records)})
+    return {'job_id': job_id, 'filename': rec.get('filename') or '', 'status': rec.get('status'),
+            'records': records, 'total': len(records), 'error': error}
 
 @app.get('/api/reviews/{job_id}/stream')
 async def stream(job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
-    j=JOBS.get(job_id)
-    if not j: raise HTTPException(404,'任务不存在')
+    with REVIEW_JOB_LOCK:
+        j=JOBS.get(job_id)
+    if not j:
+        rec=store.get_review(job_id)
+        if not rec: raise HTTPException(404,'任务不存在')
+        if rec.get('status') == 'running':
+            raise HTTPException(409,'任务正在执行，但当前进程未保留实时事件')
+        report=rec.get('report') or {}
+        j={
+            'steps':report.get('steps') or [],
+            'events':[{'type':'agent_update','message':step,'step_index':index + 1} for index, step in enumerate(report.get('steps') or [])],
+            'status':rec.get('status'), 'result':report, 'error':rec.get('error',''),
+        }
     async def gen():
         last=0
+        last_event=0
         while True:
             for step in j['steps'][last:]: yield f'event: step\ndata: {json.dumps(step,ensure_ascii=False)}\n\n'
             last=len(j['steps'])
+            for event in j.get('events', [])[last_event:]:
+                yield f'event: progress\ndata: {json.dumps(event,ensure_ascii=False)}\n\n'
+            last_event=len(j.get('events', []))
             if j['status'] in ('done','error'):
                 event='done' if j['status']=='done' else 'error'; payload=j['result'] if event=='done' else j['error']
                 yield f'event: {event}\ndata: {json.dumps(payload,ensure_ascii=False)}\n\n'; break

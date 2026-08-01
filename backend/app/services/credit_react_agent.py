@@ -437,7 +437,7 @@ def _invoke_agent_with_one_retry(messages: list[Any]) -> tuple[Any, int]:
 
 
 def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]], records_by_document: dict[str, list[dict[str, Any]]], exposure: dict[str, Any] | None,
-                           max_steps: int | None = None) -> dict[str, Any]:
+                           max_steps: int | None = None, on_event=None) -> dict[str, Any]:
     """Execute a bounded ReAct loop and return only independently verified facts."""
     max_steps = CREDIT_REACT_AGENT_MAX_STEPS if max_steps is None else max_steps
     max_steps = max(8, min(24, int(max_steps)))
@@ -453,7 +453,8 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
     requests: list[str] = []
     if not (CREDIT_AUDIT_AGENT_ENABLED and configured_financial_llm()):
         return {'status': 'execution_failed', 'reason': 'financial_audit_agent_not_configured', 'facts': {}, 'claims': [], 'trace': trace,
-                'material_requests': ['财务审计Agent未配置；生产环境未执行固定材料匹配。'], 'manifests': manifests}
+                'material_requests': ['财务审计Agent未配置；生产环境未执行固定材料匹配。'], 'manifests': manifests,
+                'evidence_sources': []}
     messages = [SystemMessage(content=_system_prompt()), HumanMessage(content=json.dumps({
         'case': {'customer_name': case.get('customer_name'), 'business_type': case.get('business_type'), 'requested_conditions': case.get('conditions') or {}},
         'material_manifest': manifests, 'exposure_snapshot_present': bool(exposure),
@@ -464,6 +465,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
     manifests_by_document = {str(item.get('document_id') or ''): item for item in manifests}
     used_tool_calls: set[str] = set()
     tool_rounds_without_claim = 0
+    observed_sources: dict[str, dict[str, Any]] = {}
 
     def _visible(items: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:
         selected = items[:limit]
@@ -477,6 +479,31 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
         value['text' if not preview else 'preview'] = str(item.get('text') or '')[:(900 if preview else 2200)]
         return value
 
+    def _remember_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        selected = []
+        for item in items:
+            source = _chunk_view(item, preview=True)
+            source['preview'] = str(source.get('preview') or '')[:520]
+            chunk_id = str(source.get('chunk_id') or '')
+            if chunk_id:
+                observed_sources[chunk_id] = source
+            selected.append(source)
+        return selected
+
+    def _observation_views(items: list[dict[str, Any]], preview: bool = False) -> list[dict[str, Any]]:
+        """Keep the model's original evidence window while publishing a short UI preview."""
+        _remember_sources(items)
+        return [_chunk_view(item, preview=preview) for item in items]
+
+    def _emit(event: dict[str, Any]) -> None:
+        if not on_event:
+            return
+        try:
+            on_event({'created_at': time.time(), **(event or {})})
+        except Exception:
+            # Progress reporting must never change the audit result.
+            pass
+
     for step in range(1, max_steps + 1):
         progress_before = _claim_progress(accepted)
         controller_note = _controller_instruction(progress_before, step, max_steps, tool_rounds_without_claim)
@@ -487,7 +514,8 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
             action = _json(response.content)
         except Exception as exc:
             return {'status': 'execution_failed', 'reason': f'agent_call_failed:{type(exc).__name__}:after_one_retry', 'facts': {}, 'claims': list(accepted.values()),
-                    'trace': trace, 'material_requests': requests, 'manifests': manifests}
+                    'trace': trace, 'material_requests': requests, 'manifests': manifests,
+                    'evidence_sources': list(observed_sources.values())}
         raw_action = str(action.get('action') or '').lower()
         name = raw_action
         tool_name = str(action.get('tool') or '') if name == 'tool' else ''
@@ -504,6 +532,10 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
                       'tool': tool_name, 'arguments': _safe_arguments(arguments), 'progress': progress_before,
                       'controller_note': controller_note, 'normalized_action': raw_action if raw_action != name else '',
                       'model_retry_count': retry_count})
+        _emit({'type': 'agent_action', 'step': step, 'action': name, 'tool': tool_name,
+               'reason_summary': trace[-1]['reason_summary'], 'arguments': trace[-1]['arguments'],
+               'progress': progress_before,
+               'message': f'Agent 第 {step} 轮：{tool_name or trace[-1]["action"]}'})
         observation: dict[str, Any]
         if name == 'tool':
             tool = tool_name
@@ -527,15 +559,17 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
                     pool = [item for item in chunks if not doc_ids or item.get('document_id') in doc_ids]
                     try:
                         ranked = rerank_required(query, pool)
+                        source_views = _observation_views(ranked['results'], preview=True)
                         visible_chunk_ids.update(str(item['chunk_id']) for item in ranked['results'])
                         observation = {'tool': tool, 'query': query, 'mode': ranked['mode'], 'request_id': ranked.get('request_id', ''),
-                                       'chunks': [_chunk_view(item, preview=True) for item in ranked['results']]}
+                                       'chunks': source_views}
                     except RerankUnavailable as exc:
                         technical_errors.append(str(exc))
                         observation = {'tool': tool, 'error': str(exc), 'retryable': True}
             elif tool == 'read_evidence':
                 ids = [str(item) for item in arguments.get('chunk_ids') or []][:12]
-                observation = {'tool': tool, 'chunks': [_chunk_view(item) for item in _visible([chunks_by_id[item] for item in ids if item in chunks_by_id])]}
+                selected = _visible([chunks_by_id[item] for item in ids if item in chunks_by_id])
+                observation = {'tool': tool, 'chunks': _observation_views(selected)}
             elif tool == 'get_document_outline':
                 document_id = str(arguments.get('document_id') or '')
                 manifest = manifests_by_document.get(document_id)
@@ -550,7 +584,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
                     page = 0
                 selected = _page_context_selection([item for item in chunks if item.get('document_id') == document_id and item.get('page') == page])
                 observation = {'tool': tool, 'document_id': document_id, 'page': page,
-                               'chunks': [_chunk_view(item) for item in _visible(selected, limit=16)]}
+                               'chunks': _observation_views(_visible(selected, limit=16))}
                 if not selected:
                     observation['error'] = 'page_context_not_found'
             elif tool == 'get_table_context':
@@ -558,7 +592,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
                 selected = [item for item in chunks if item.get('document_id') == document_id and item.get('source_kind') in {'table', 'sheet'}
                             and source_ref and (source_ref in str(item.get('source_ref') or '') or str(item.get('source_ref') or '') in source_ref)]
                 observation = {'tool': tool, 'document_id': document_id, 'source_ref': source_ref,
-                               'chunks': [_chunk_view(item) for item in _visible(selected)]}
+                               'chunks': _observation_views(_visible(selected))}
                 if not selected:
                     observation['error'] = 'table_context_not_found'
             elif tool == 'inspect_exposure_snapshot':
@@ -576,6 +610,11 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
             trace[-1]['result_summary'] = _tool_result_summary(observation)
             trace[-1]['observation'] = {'tool': observation.get('tool'), 'error': observation.get('error'),
                                         'chunk_ids': [item.get('chunk_id') for item in observation.get('chunks') or []]}
+            _emit({'type': 'tool_result', 'step': step, 'tool': tool, 'result_summary': trace[-1]['result_summary'],
+                   'error': observation.get('error') or '',
+                   'sources': [observed_sources[item.get('chunk_id')] for item in observation.get('chunks') or []
+                               if item.get('chunk_id') in observed_sources],
+                   'message': trace[-1]['result_summary']})
             messages.append(HumanMessage(content=json.dumps({'tool_observation': observation}, ensure_ascii=False)))
             continue
         if name == 'submit_claims':
@@ -592,31 +631,48 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
             trace[-1]['claim_shape'] = _claim_shape(raw_claims)
             trace[-1]['result_summary'] = f"提交 {len(raw_claims)} 条 Claim；通过 {len(valid)} 条，拒绝 {len(rejected)} 条"
             trace[-1]['progress_after'] = _claim_progress(accepted)
+            claim_source_ids = {str(item.get('evidence_id') or item.get('source_chunk_id') or '') for item in valid}
+            _emit({'type': 'claim_validated', 'step': step, 'result_summary': trace[-1]['result_summary'],
+                   'claims': valid,
+                   'sources': [source for chunk_id, source in observed_sources.items() if chunk_id in claim_source_ids],
+                   'progress': trace[-1]['progress_after'], 'message': trace[-1]['result_summary']})
             messages.append(HumanMessage(content=json.dumps(observation, ensure_ascii=False)))
             if ready:
                 return {'status': 'ready_for_policy', 'facts': facts, 'claims': list(accepted.values()), 'trace': trace,
-                        'material_requests': requests, 'observations': observations, 'manifests': manifests}
+                        'material_requests': requests, 'observations': observations, 'manifests': manifests,
+                        'evidence_sources': list(observed_sources.values())}
             continue
         if name == 'request_materials':
             requests.extend(str(item)[:500] for item in action.get('material_requests') or [] if str(item).strip())
             ready, missing, facts = _completion(accepted, exposure)
             trace[-1]['result_summary'] = f"请求 {len(action.get('material_requests') or [])} 项补件；当前可评分={ready}"
             trace[-1]['progress_after'] = _claim_progress(accepted)
+            _emit({'type': 'request_materials', 'step': step, 'result_summary': trace[-1]['result_summary'],
+                   'requests': list(dict.fromkeys(requests)), 'progress': trace[-1]['progress_after'],
+                   'message': trace[-1]['result_summary']})
             return {'status': 'not_assessable', 'reason': 'agent_requested_materials', 'facts': facts if ready else {}, 'claims': list(accepted.values()),
-                    'trace': trace, 'material_requests': list(dict.fromkeys([*requests, *missing])), 'observations': observations, 'manifests': manifests}
+                    'trace': trace, 'material_requests': list(dict.fromkeys([*requests, *missing])), 'observations': observations, 'manifests': manifests,
+                    'evidence_sources': list(observed_sources.values())}
         if name == 'finish':
             ready, missing, facts = _completion(accepted, exposure)
             trace[-1]['result_summary'] = f"结束审计；当前可评分={ready}"
             trace[-1]['progress_after'] = _claim_progress(accepted)
+            _emit({'type': 'finish', 'step': step, 'result_summary': trace[-1]['result_summary'],
+                   'progress': trace[-1]['progress_after'], 'message': trace[-1]['result_summary']})
             return {'status': 'ready_for_policy' if ready else 'not_assessable', 'reason': '' if ready else 'required_claims_missing',
                     'facts': facts if ready else {}, 'claims': list(accepted.values()), 'trace': trace,
-                    'material_requests': list(dict.fromkeys([*requests, *missing])), 'observations': observations, 'manifests': manifests}
+                    'material_requests': list(dict.fromkeys([*requests, *missing])), 'observations': observations, 'manifests': manifests,
+                    'evidence_sources': list(observed_sources.values())}
         trace[-1]['result_summary'] = '无效 Agent 动作；已要求重新选择受支持操作'
+        _emit({'type': 'invalid_action', 'step': step, 'result_summary': trace[-1]['result_summary'],
+               'message': trace[-1]['result_summary']})
         messages.append(HumanMessage(content=json.dumps({'tool_observation': {'error': 'invalid_action'}}, ensure_ascii=False)))
     ready, missing, facts = _completion(accepted, exposure)
     if technical_errors:
         return {'status': 'execution_failed', 'reason': 'rerank_unavailable', 'facts': {}, 'claims': list(accepted.values()), 'trace': trace,
-                'material_requests': requests, 'observations': observations, 'manifests': manifests, 'technical_errors': technical_errors}
+                'material_requests': requests, 'observations': observations, 'manifests': manifests, 'technical_errors': technical_errors,
+                'evidence_sources': list(observed_sources.values())}
     return {'status': 'ready_for_policy' if ready else 'not_assessable', 'reason': '' if ready else 'max_agent_steps_reached',
             'facts': facts if ready else {}, 'claims': list(accepted.values()), 'trace': trace,
-            'material_requests': list(dict.fromkeys([*requests, *missing])), 'observations': observations, 'manifests': manifests}
+            'material_requests': list(dict.fromkeys([*requests, *missing])), 'observations': observations, 'manifests': manifests,
+            'evidence_sources': list(observed_sources.values())}

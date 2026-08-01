@@ -39,6 +39,7 @@ class CreditState(TypedDict, total=False):
     agent_followups: list[dict[str, str]]
     fact_provenance: dict[str, dict[str, Any]]
     react_audit: dict[str, Any]
+    on_event: Any
     steps: Annotated[list[str], lambda left, right: left + right]
 
 
@@ -765,7 +766,10 @@ def node_production_materials(state: CreditState) -> CreditState:
 
 
 def node_react_audit(state: CreditState) -> CreditState:
-    audit = run_react_credit_audit(state.get('case') or {}, state.get('documents') or [], state.get('records_by_document') or {}, state.get('exposure') or {})
+    audit = run_react_credit_audit(
+        state.get('case') or {}, state.get('documents') or [], state.get('records_by_document') or {}, state.get('exposure') or {},
+        on_event=state.get('on_event'),
+    )
     # The Agent trace and every verified Claim are persisted in the encrypted
     # assessment report/evidence table, allowing a reviewer to reproduce why a
     # recommendation was or was not possible.
@@ -838,7 +842,8 @@ def build_credit_graph():
     return graph.compile()
 
 
-def run_credit_assessment(case: dict[str, Any], documents: list[dict[str, Any]], exposure: dict[str, Any] | None, model: dict[str, Any], on_step=None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def run_credit_assessment(case: dict[str, Any], documents: list[dict[str, Any]], exposure: dict[str, Any] | None,
+                          model: dict[str, Any], on_step=None, on_event=None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Run synchronously inside a worker and return report plus persisted evidence.
 
     Stream graph values rather than reporting every step only after ``invoke``
@@ -848,7 +853,7 @@ def run_credit_assessment(case: dict[str, Any], documents: list[dict[str, Any]],
     graph = build_credit_graph()
     result: dict[str, Any] = {}
     emitted_steps = 0
-    initial = {'case': case, 'documents': documents, 'exposure': exposure or {}, 'model': model, 'steps': []}
+    initial = {'case': case, 'documents': documents, 'exposure': exposure or {}, 'model': model, 'steps': [], 'on_event': on_event}
     for state in graph.stream(initial, stream_mode='values'):
         result = state
         steps = state.get('steps') or []

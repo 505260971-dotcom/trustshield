@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { AutoComplete, Badge, Button, Dropdown, Drawer, Layout, List, Menu, Modal, Space, Spin, Tag, Typography, type MenuProps } from 'antd'
 import {
-  ApartmentOutlined, BookOutlined, CheckCircleOutlined, DashboardOutlined,
+  ApartmentOutlined, BarChartOutlined, BookOutlined, CheckCircleOutlined, DashboardOutlined,
   FileAddOutlined, FolderOpenOutlined, ReloadOutlined, SafetyCertificateOutlined, SearchOutlined, SettingOutlined,
   TeamOutlined, UnorderedListOutlined,
 } from '@ant-design/icons'
@@ -23,11 +23,13 @@ const CaseCenterPage = lazy(() => import('./pages/CaseCenterPage'))
 const CustomerWorkspacePage = lazy(() => import('./pages/CustomerWorkspacePage'))
 const CustomerProfilePage = lazy(() => import('./pages/CustomerProfilePage'))
 const ApprovalCenterPage = lazy(() => import('./pages/ApprovalCenterPage'))
+const BatchMatrixPage = lazy(() => import('./pages/BatchMatrixPage'))
+const KnowledgePage = lazy(() => import('./pages/KnowledgePage'))
 
 const { Sider, Header, Content } = Layout
 const { Title, Text } = Typography
 type RoleKey = 'business' | 'reviewer' | 'director' | 'admin'
-type Page = 'home' | 'customers' | 'customer' | 'credits' | 'credit' | 'contracts' | 'case' | 'new' | 'records' | 'approvals' | 'admin' | 'settings'
+type Page = 'home' | 'customers' | 'customer' | 'credits' | 'credit' | 'contracts' | 'case' | 'new' | 'records' | 'approvals' | 'matrix' | 'knowledge' | 'admin' | 'settings'
 type Route = { page: Page; customerKey?: string; caseId?: string; creditId?: string; creditCreate?: boolean; creditNewCustomerKey?: string }
 
 function parseRoute(): Route {
@@ -42,6 +44,8 @@ function parseRoute(): Route {
   if (parts[0] === 'contracts') return { page: 'contracts' }
   if (parts[0] === 'records') return { page: 'records' }
   if (parts[0] === 'approvals') return { page: 'approvals' }
+  if (parts[0] === 'matrix') return { page: 'matrix' }
+  if (parts[0] === 'knowledge') return { page: 'knowledge' }
   if (parts[0] === 'admin') return { page: 'admin' }
   if (parts[0] === 'settings') return { page: 'settings' }
   return { page: 'home' }
@@ -50,14 +54,15 @@ function parseRoute(): Route {
 const routeTitle: Record<Page, string> = {
   home: '待我处理', customers: '客户工作台', customer: '客户档案', credits: '信审管理', credit: '客户信审',
   contracts: '合同审查', case: '合同案件', new: '发起合同审查', records: '我的记录', approvals: '审批中心',
+  matrix: '风险矩阵', knowledge: '条款知识库',
   admin: '组织与规则', settings: '系统与集成',
 }
 
 const access: Record<RoleKey, Page[]> = {
   business: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'new', 'records'],
-  reviewer: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'records'],
-  director: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'records', 'approvals'],
-  admin: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'records', 'approvals', 'admin', 'settings'],
+  reviewer: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'matrix', 'knowledge', 'records'],
+  director: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'matrix', 'records', 'approvals'],
+  admin: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'matrix', 'knowledge', 'records', 'approvals', 'admin', 'settings'],
 }
 
 const activeMenuFor = (page: Page): string => {
@@ -100,13 +105,17 @@ function AppInner() {
     if (role === 'reviewer') base.push(
       { key: 'credits', icon: <SafetyCertificateOutlined />, label: '信审管理' },
       { key: 'contracts', icon: <FolderOpenOutlined />, label: '合同审查' },
+      { key: 'matrix', icon: <BarChartOutlined />, label: '风险矩阵' },
+      { key: 'knowledge', icon: <BookOutlined />, label: '条款知识库' },
       { key: 'records', icon: <CheckCircleOutlined />, label: '我的记录' },
     )
     if (['director', 'admin'].includes(role)) base.push(
       { key: 'approvals', icon: <ApartmentOutlined />, label: '审批中心' },
+      { key: 'matrix', icon: <BarChartOutlined />, label: '风险矩阵' },
       { key: 'records', icon: <CheckCircleOutlined />, label: '我的记录' },
     )
     if (role === 'admin') base.push(
+      { key: 'knowledge', icon: <BookOutlined />, label: '条款知识库' },
       { type: 'divider' },
       { key: 'admin', icon: <TeamOutlined />, label: '组织与规则' },
       { key: 'settings', icon: <SettingOutlined />, label: '系统与集成' },
@@ -143,7 +152,7 @@ function AppInner() {
   } else if (activeRoute.page === 'contracts') {
     page = <CaseCenterPage onCreate={() => createContractFor()} onOpen={openCase} canCreateContract={canCreateContract} />
   } else if (activeRoute.page === 'case' && activeRoute.caseId) {
-    page = <CaseDetailPage caseId={activeRoute.caseId} onBack={() => go('/contracts')} />
+    page = <CaseDetailPage caseId={activeRoute.caseId} onBack={() => go('/contracts')} onCreateCredit={customerName => createCreditFor(customerOptions.find(customer => customer.customer_name === customerName))} />
   } else if (activeRoute.page === 'new') {
     page = <ReviewPage initialCustomerKey={activeRoute.customerKey} onCreated={openCase} />
   } else if (activeRoute.page === 'credits' || activeRoute.page === 'credit') {
@@ -152,6 +161,10 @@ function AppInner() {
     page = <WorkboxPage bucket="done" canCreateContract={canCreateContract} canCreateCredit={canCreateCredit} onCreateContract={() => createContractFor()} onCreateCredit={() => createCreditFor()} onOpenCase={openCase} onOpenCredit={openCredit} />
   } else if (activeRoute.page === 'approvals') {
     page = <ApprovalCenterPage onOpenCase={openCase} onOpenCredit={openCredit} />
+  } else if (activeRoute.page === 'matrix') {
+    page = <BatchMatrixPage />
+  } else if (activeRoute.page === 'knowledge') {
+    page = <KnowledgePage />
   } else if (activeRoute.page === 'settings' && role === 'admin') {
     page = <SettingsPage onSaved={ping} />
   } else if (activeRoute.page === 'admin' && role === 'admin') {

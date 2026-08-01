@@ -16,8 +16,13 @@ export const sev2Icon: Record<string, any> = {
   low: <CheckCircleTwoTone twoToneColor="#389e0d" />
 }
 
-export const overallColor = (level?: string) =>
-  (level||'').startsWith('阻断') ? 'error' : (level||'').startsWith('需重点') ? 'warning' : 'success'
+export const overallColor = (level?: string) => {
+  const value = level || ''
+  if (value.startsWith('阻断')) return 'error'
+  if (value.startsWith('需重点')) return 'warning'
+  if (/通过|可签约|已生效|无风险/.test(value)) return 'success'
+  return 'info'
+}
 
 export const riskTableCols = [
   { title: '条款', dataIndex: 'clause_id', width: 70,

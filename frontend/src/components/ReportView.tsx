@@ -1,12 +1,16 @@
 import { useMemo, useState } from 'react'
-import { Card, Row, Col, Statistic, Result, Tabs, Table, Descriptions, Empty, List, Button, Dropdown, Space, Typography, Alert, Tag, message, Modal, Input, Select } from 'antd'
+import { Card, Row, Col, Statistic, Result, Tabs, Table, Descriptions, Empty, List, Button, Collapse, Dropdown, Space, Typography, Alert, Tag, message, Modal, Input, Select } from 'antd'
 import { DownloadOutlined, SafetyCertificateOutlined, ReloadOutlined, FileWordOutlined, TranslationOutlined, SwapOutlined, FileTextOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
-import type { KnowledgeItem, Report, Risk, RuleItem } from '../types'
+import type { KnowledgeItem, Report, Risk, RuleItem, VersionComparison } from '../types'
 import { riskTableCols, clauseTableCols, overallColor, downloadText, roleRiskVisible, roleRiskHighlight } from './common'
 import { useRole, ROLE_DESC } from '../context/RoleContext'
 import { api } from '../services/api'
 import TranslateModal from './TranslateModal'
 import CaseWorkflowPanel from './CaseWorkflowPanel'
+import TaskContextBanner from './TaskContextBanner'
+import ContractReviewWorkspace from './ContractReviewWorkspace'
+import CaseReviewAssistant from './CaseReviewAssistant'
+import { ContractDecisionSummary, VersionEffectSummary } from './ContractDecisionSummary'
 
 const { Text } = Typography
 
@@ -38,7 +42,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   const [actionBusy, setActionBusy] = useState(false)
   const [compareOpen, setCompareOpen] = useState(false)
   const [baselineId, setBaselineId] = useState('')
-  const [comparison, setComparison] = useState<any>(null)
+  const [comparison, setComparison] = useState<VersionComparison|null>(null)
   const [similarCases, setSimilarCases] = useState<KnowledgeItem[]>([])
   const [activeLang, setActiveLang] = useState('en')
   const [focusClauseId, setFocusClauseId] = useState<string>('')
@@ -61,6 +65,12 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   const activeRisk = orderedRisks.find(risk => riskKey(risk) === focusRiskKey) || orderedRisks[0]
   const activeRiskIndex = activeRisk ? orderedRisks.findIndex(risk => riskKey(risk) === riskKey(activeRisk)) : -1
   const activeClause = activeRisk ? (report.clauses || []).find(clause => clause.id === activeRisk.clause_id) : undefined
+  const reportContext = visibleRisks.length > 0
+    ? `当前视角下有 ${visibleRisks.length} 条风险，其中 ${visibleRisks.filter(risk => risk.severity === 'high').length} 条高风险；风险项按“待处置优先、严重程度优先”排序。`
+    : reviewHints.length > 0
+      ? '当前没有可直接处置的风险，但仍有条款事实、主体或审批例外需要人工确认。'
+      : '当前报告未发现需要处置的风险，可继续核对合同字段、审查依据和导出交付物。'
+  const reportNextAction = visibleRisks.length > 0 ? '从左侧问题条款导航开始，逐条查看原文、证据和规则底线。' : reviewHints.length > 0 ? '先处理待人工确认事项，再决定是否可以继续签署。' : '核对审查链路和合同字段后导出留档。'
 
   const exportMarkdown = () => {
     const L: string[] = []
@@ -111,6 +121,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
     setFocusRiskKey(riskKey(risk))
     setFocusClauseId(risk.clause_id)
     setMainTab('annotate')
+    window.setTimeout(() => document.getElementById('report-risk-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0)
   }
   const jumpToClause = (clauseId: string) => {
     const risk = orderedRisks.find(item => item.clause_id === clauseId)
@@ -166,7 +177,15 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
         </Row>
       </Card>
 
-      <Card title={`风险清单（${visibleRisks.length} 条${hidden>0?` · 当前视角已过滤 ${hidden} 条`:''}）`} extra={
+      <TaskContextBanner role={role} title="合同审查结果工作区" description={reportContext} nextAction={reportNextAction}/>
+
+      <ContractDecisionSummary report={report} visibleRisks={visibleRisks} onSelectRisk={selectRisk} />
+
+      <CaseReviewAssistant report={report} risks={visibleRisks} onSelectRisk={selectRisk} />
+
+      {jid && <ContractReviewWorkspace jobId={jid} report={report}/>}
+
+      <Card id="report-risk-card" title={`风险清单（${visibleRisks.length} 条${hidden>0?` · 当前视角已过滤 ${hidden} 条`:''}）`} extra={
         <Space wrap>
           <Dropdown menu={{items:[{key:'revised',label:'导出修订建议稿',icon:<FileWordOutlined/>,disabled:!jid},{key:'plain',label:'导出原文留档',icon:<FileTextOutlined/>,disabled:!jid},{key:'bilingual',label:`导出双语对照稿（${activeLang.toUpperCase()}）`,icon:<FileWordOutlined/>,disabled:!jid},{type:'divider'},{key:'markdown',label:'导出 Markdown',icon:<DownloadOutlined/>},{key:'json',label:'导出 JSON'}],onClick:({key})=>{if(key==='revised')exportWord('revised');else if(key==='plain')exportWord('plain');else if(key==='bilingual')exportWord('bilingual',activeLang);else if(key==='markdown')exportMarkdown();else if(key==='json')downloadText(`${report.filename}.json`, JSON.stringify(report,null,2),'application/json')}}}><Button icon={<DownloadOutlined/>} loading={!!exporting}>导出交付物</Button></Dropdown>
           <Select size="small" value={activeLang} style={{width:110}} onChange={setActiveLang}
@@ -241,7 +260,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
         ]}/>
       </Card>
 
-      {showLegacyWorkflow && <CaseWorkflowPanel jobId={jid} />}
+      {showLegacyWorkflow && <Collapse className="case-technical-collapse" items={[{key:'workflow',label:'查看 Agent 运行轨迹与流程技术详情',children:<CaseWorkflowPanel jobId={jid}/>}]} />}
 
       <TranslateModal jobId={jid} open={transOpen} onClose={()=>setTransOpen(false)} onTranslated={(lang)=>setActiveLang(lang)} />
       <Modal title={`处置风险 ${actionRisk?.rule_id||''}`} open={!!actionRisk} onCancel={()=>setActionRisk(null)} onOk={submitAction} okText="确认提交" confirmLoading={actionBusy}>
@@ -249,7 +268,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
       </Modal>
       {showVersionCompare&&<Modal title="合同版本对比" open={compareOpen} onCancel={()=>setCompareOpen(false)} onOk={compareVersions} okText="开始对比">
         <Input value={baselineId} onChange={event=>setBaselineId(event.target.value)} placeholder="输入上一版本的任务 ID" />
-        {comparison && <div style={{marginTop:16}}><Text>新增风险：{comparison.new_risks?.join('、')||'无'}</Text><br/><Text>已消除风险：{comparison.resolved_risks?.join('、')||'无'}</Text><br/><Text>仍存在风险：{comparison.persisting_risks?.join('、')||'无'}</Text><br/><Text>变更条款：{comparison.changed_clauses?.join('、')||'无'}</Text>{comparison.review_scope?.mode==='incremental'&&<><br/><Tag color="blue">增量复审</Tag><Text> 实际复审变更条款 {comparison.review_scope.changed_clause_ids?.length||0} 条，附带上下文 {comparison.review_scope.context_clause_ids?.length||0} 条。</Text></>}</div>}
+        <VersionEffectSummary comparison={comparison} />
       </Modal>}
     </>
   )
