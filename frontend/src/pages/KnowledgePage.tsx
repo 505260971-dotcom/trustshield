@@ -20,7 +20,7 @@ export default function KnowledgePage() {
   const coveredRules=new Set(items.map(item=>item.rule_id)).size
   return <div className="role-page knowledge-page">
     <section className="page-hero page-hero-light">
-      <div><span className="section-kicker">APPROVED KNOWLEDGE</span><Typography.Title level={2}>风险条款知识库</Typography.Title><Typography.Paragraph>仅沉淀人工采纳或编辑后采纳的脱敏案例。它用于辅助理解历史风险处置，不替代当前案件的规则判断。</Typography.Paragraph></div>
+      <div><span className="section-kicker">已确认案例</span><Typography.Title level={2}>风险条款知识库</Typography.Title><Typography.Paragraph>这里只保存人工确认或编辑后采用的匿名案例，用于参考历史风险处理方式，不替代当前案件的规则判断。</Typography.Paragraph></div>
       <div className="page-hero-actions"><Select allowClear placeholder="按规则筛选" style={{ width: 250 }} value={ruleId || undefined} options={rules.map(x => ({ value: x.id, label: `${x.id} ${x.baseline}` }))} onChange={value => { setRuleId(value || ''); load(value || '') }} /></div>
     </section>
     <section className="compact-metrics" aria-label="知识库概览">
@@ -28,8 +28,8 @@ export default function KnowledgePage() {
       <div className="compact-metric metric-attention"><span className="compact-metric-icon"><BookOutlined/></span><div><small>覆盖规则</small><strong>{coveredRules}</strong><em>已有可回溯案例</em></div></div>
       <div className="compact-metric"><span className="compact-metric-icon"><BookOutlined/></span><div><small>规则目录</small><strong>{rules.length}</strong><em>可作为筛选条件</em></div></div>
     </section>
-    <Card className="page-data-card knowledge-list-card" title={<div><span className="card-kicker">REFERENCE CASES</span><span>已采纳案例</span></div>}>
-      {loading ? <div className="page-loading"><Spin /> <Text type="secondary">正在整理脱敏案例…</Text></div> : items.length ? <List dataSource={items} renderItem={item => <List.Item><List.Item.Meta avatar={<Tag color="blue">{item.rule_id}</Tag>} title={<Space wrap><Text strong>{item.source_ref || '历史条款'}</Text><Tag color="green">{item.outcome}</Tag><Tag>{item.business_type || '一般'}</Tag></Space>} description={<div className="knowledge-case-copy"><div><b>证据</b>{item.evidence || '—'}</div><div><b>推荐改写</b>{item.suggested_text || '—'}</div><Text type="secondary">沉淀时间：{fmtTime(item.created_at)}</Text></div>} /></List.Item>} /> : <Empty image={<BookOutlined style={{fontSize:48}} />} description="尚无已人工采纳的脱敏风险案例" />}
+    <Card className="page-data-card knowledge-list-card" title={<div><span className="card-kicker">参考案例</span><span>已确认案例</span></div>}>
+      {loading ? <div className="page-loading"><Spin /> <Text type="secondary">正在整理匿名案例…</Text></div> : items.length ? <List dataSource={items} renderItem={item => <List.Item><List.Item.Meta avatar={<Tag color="blue">{item.rule_id}</Tag>} title={<Space wrap><Text strong>{item.source_ref || '历史条款'}</Text><Tag color="green">{item.outcome}</Tag><Tag>{item.business_type || '一般'}</Tag></Space>} description={<div className="knowledge-case-copy"><div><b>处理依据</b>{item.evidence || '—'}</div><div><b>建议改写</b>{item.suggested_text || '—'}</div><Text type="secondary">记录时间：{fmtTime(item.created_at)}</Text></div>} /></List.Item>} /> : <Empty image={<BookOutlined style={{fontSize:48}} />} description="暂无人工确认的匿名风险案例" />}
     </Card>
   </div>
 }

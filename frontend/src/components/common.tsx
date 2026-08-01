@@ -4,7 +4,7 @@ import { CheckCircleTwoTone, ExclamationCircleTwoTone, CloseCircleTwoTone } from
 
 /** Technical RBAC identifiers never leak into the business-facing UI. */
 export const approvalRoleLabel = (role?: string) => ({
-  admin: '集团财务总监 / 最终审批人',
+  admin: '集团财务总监（最终审批人）',
   director: '财务审批主管',
   reviewer: '信用审核专员',
   business: '业务申请人',
@@ -29,20 +29,20 @@ export const riskTableCols = [
     render: (v:string, r:Risk) => <span style={{fontWeight:600}}>{v} <span style={{fontSize:11,color:'#999'}}>·{r.source_ref || `p${r.page}`}</span></span> },
   { title: '风险等级', width: 165, render: (_:any, r:Risk) =>
     <span style={{color: sevColorOf(r),lineHeight:1.5}}>{sev2Icon[r.severity]} {r.level}</span> },
-  { title: '违反底限条款', dataIndex: 'rule_id', width: 240, render: (v:string, r:Risk) => <>
+  { title: '命中的底线规则', dataIndex: 'rule_id', width: 240, render: (v:string, r:Risk) => <>
     <span style={{fontWeight:600}}>{v}</span><br/><span style={{fontSize:12,color:'#888'}}>{r.rule_baseline}</span></> },
-  { title: '风险证据', dataIndex: 'evidence', width: 320, render: (v:string)=> <span className="risk-cell-text">{v || '—'}</span> },
-  { title: '数值依据', dataIndex: 'numeric_note', width: 190, render:(v:string)=>
+  { title: '命中依据', dataIndex: 'evidence', width: 320, render: (v:string)=> <span className="risk-cell-text">{v || '—'}</span> },
+  { title: '数值核对', dataIndex: 'numeric_note', width: 190, render:(v:string)=>
     v ? <span className="risk-cell-text" style={{color:'#722ed1'}}>{v}</span> : <span style={{color:'#ccc'}}>—</span> },
-  { title: '规则裁决', width: 220, render:(_:any,r:Risk)=> <span className="risk-cell-text">{r.decision === 'requires_approval' ? `需${approvalRoleLabel(r.approval_required)}审批` : r.decision === 'needs_human_confirmation' ? '待补材料/人工确认' : '已确认风险'}{r.facts && Object.keys(r.facts).length ? `；事实：${Object.entries(r.facts).filter(([,value])=>value!==null&&value!==undefined&&value!=='').map(([key,value])=>`${key}=${value}`).join('，')}` : ''}</span> },
-  { title: '修改建议', dataIndex: 'suggestion', width: 380, render:(v:string)=> <span className="risk-cell-text">{v || '—'}</span> }
+  { title: '规则判定', width: 220, render:(_:any,r:Risk)=> <span className="risk-cell-text">{r.decision === 'requires_approval' ? `需${approvalRoleLabel(r.approval_required)}审批` : r.decision === 'needs_human_confirmation' ? '待补材料或人工确认' : '已确认'}{r.facts && Object.keys(r.facts).length ? `；事实：${Object.entries(r.facts).filter(([,value])=>value!==null&&value!==undefined&&value!=='').map(([key,value])=>`${key}=${value}`).join('，')}` : ''}</span> },
+  { title: '建议修改方式', dataIndex: 'suggestion', width: 380, render:(v:string)=> <span className="risk-cell-text">{v || '—'}</span> }
 ]
 
 const sevColorOf = (r: Risk) => r.severity==='high' ? '#cf1322' : r.severity==='mid' ? '#d48806' : '#389e0d'
 
 export const clauseTableCols = [
   { title: '条款', dataIndex: 'id', width: 70 },
-  { title: '定位', width: 150, render: (_:unknown, r:{start_page:number;source_ref?:string}) => <span>{r.source_ref || `p${r.start_page}`}</span> },
+  { title: '原文位置', width: 150, render: (_:unknown, r:{start_page:number;source_ref?:string}) => <span>{r.source_ref || `第 ${r.start_page} 页`}</span> },
   { title: '条款内容', dataIndex: 'text',
     render:(v:string)=> <span style={{whiteSpace:'pre-wrap', fontSize:13}}>{v}</span> }
 ]

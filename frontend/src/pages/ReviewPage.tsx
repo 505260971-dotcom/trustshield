@@ -43,7 +43,7 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
         form.setFieldValue('credit_case_id', undefined)
         setCreditCaseId('')
       }
-    } catch (error: any) { message.error(error?.message || '加载客户信审失败') }
+    } catch (error: any) { message.error(error?.message || '加载客户信用审核失败') }
   }
 
   useEffect(() => {
@@ -90,7 +90,7 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
       const boundCreditCaseId = String(value.credit_case_id || form.getFieldValue('credit_case_id') || creditCaseId || (credits.length === 1 ? credits[0].case_id : '')).trim()
       if (!boundCreditCaseId) {
         setStep(1)
-        form.setFields([{ name: 'credit_case_id', errors: ['请选择已生效信审版本'] }])
+        form.setFields([{ name: 'credit_case_id', errors: ['请选择已生效的信用审核版本'] }])
         return
       }
       if (!mainFile) return message.warning('请上传一份主合同后再提交')
@@ -104,48 +104,48 @@ export default function ReviewPage({ onCreated, initialCustomerKey }: Props) {
       onCreated(root.case_id)
     } catch (error: any) { if (!error?.errorFields) message.error(error?.message || '提交失败') } finally { setBusy(false) }
   }
-  const customerOptions = useMemo(() => customers.map(customer => ({ value: customer.customer_name, label: <Space><span>{customer.customer_name}</span>{customer.latest_credit?.status === 'approved' ? <span className="customer-option-status">有效信审 V{customer.latest_credit.version}</span> : <span className="customer-option-status is-warning">暂无有效信审</span>}</Space> })), [customers])
+  const customerOptions = useMemo(() => customers.map(customer => ({ value: customer.customer_name, label: <Space><span>{customer.customer_name}</span>{customer.latest_credit?.status === 'approved' ? <span className="customer-option-status">有效信用审核 V{customer.latest_credit.version}</span> : <span className="customer-option-status is-warning">暂无有效信用审核</span>}</Space> })), [customers])
   const selectedCredit = credits.find(item => item.case_id === selectedCreditId)
   const selectedBusinessType = Form.useWatch('business_type', form) || '一般'
   const businessTypeHint: Record<string, string> = {
     '模塑一体': '重点确认交付前收款比例、质保和尾款条件；如低于制度底线，请准备对应特批依据。',
-    TKM: '重点确认走模前收款比例、尾期放账和尾期账期，相关特批材料建议与合同一起上传。',
-    TKP: '重点确认信用额度、账期、付款方式与已生效信审边界是否一致。',
+    TKM: '重点确认模具交付前收款比例、尾款放账和尾款账期，相关特别审批材料建议与合同一起上传。',
+    TKP: '重点确认信用额度、账期、付款方式与已生效信用审核条件是否一致。',
     '采购订单': '建议同时上传订单、报价或补充协议，便于系统核对金额、账期和收款条件。',
     一般: '建议上传主合同及能说明交易背景、金额和付款条件的关联材料。',
   }
   const creditLinkCopy = credits.length === 1
-    ? `系统已自动关联唯一可用的信审版本 V${credits[0].version}`
+    ? `系统已自动关联唯一可用的信用审核版本 V${credits[0].version}`
     : credits.length > 1 && selectedCredit
       ? `系统已推荐最新生效版本 V${selectedCredit.version}；你可在下一步确认或切换版本`
       : ''
 
   return <div className="review-request-page">
-    <TaskContextBanner role={user?.role} title="发起合同审查" description="先确认客户和已生效信审边界，再上传主合同；系统会自动把合同条件与信审边界、合同底线规则进行比对。" nextAction={credits.length ? '确认信审边界并上传合同' : '先完成客户信审'} />
+    <TaskContextBanner role={user?.role} title="发起合同审查" description="先确认客户和已生效的信用审核条件，再上传主合同；系统会将合同条件与信用审核条件、合同底线规则进行比对。" nextAction={credits.length ? '确认信用审核条件并上传合同' : '先完成客户信用审核'} />
     <Card title={<Space><FileAddOutlined />发起合同审查</Space>} extra={step === 2 ? <Button type="primary" loading={busy} onClick={submit}>创建案件并提交审查</Button> : null}>
-      <Steps className="review-request-steps" current={step} responsive items={[{ title: '选择客户' }, { title: '确认信审' }, { title: '上传合同' }]} />
+      <Steps className="review-request-steps" current={step} responsive items={[{ title: '选择客户' }, { title: '确认信用审核条件' }, { title: '上传合同' }]} />
       <Form form={form} layout="vertical" preserve initialValues={{ business_type: '一般', priority: 'normal' }} className="review-request-form" onValuesChange={changed => { if (Object.prototype.hasOwnProperty.call(changed, 'customer_name')) setCustomerName(String(changed.customer_name || '').trim()); if (Object.prototype.hasOwnProperty.call(changed, 'credit_case_id')) setCreditCaseId(String(changed.credit_case_id || '').trim()) }}>
         {step === 0 && <section className="request-step-panel">
           <Typography.Title level={4}>客户</Typography.Title>
           <Form.Item name="customer_name" label="客户名称" rules={[{ required: true, message: '请选择或填写客户名称' }]}>
             <AutoComplete options={customerOptions} placeholder="搜索已有客户，或输入新客户名称" filterOption={(input, option) => String(option?.value || '').toLowerCase().includes(input.toLowerCase())} onSelect={selectCustomer} onBlur={() => loadCredits()} />
           </Form.Item>
-          {!!creditLinkCopy && <div className="credit-link-status"><SafetyCertificateOutlined /><div><Text strong>{creditLinkCopy}</Text><Text type="secondary">合同将始终以已生效信审边界为准，提交前可在下一步查看额度、账期和付款条件。</Text></div></div>}
-          {creditWarning && <Alert type="warning" showIcon message="该客户暂无可用的已生效信审版本" description={<Space direction="vertical" size={4}><span>合同不能直接进入正式审查。请先完成客户信审审批，再返回发起合同。</span><Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => { window.location.hash = '/credit/new' }}>先发起客户信审</Button></Space>} />}
+          {!!creditLinkCopy && <div className="credit-link-status"><SafetyCertificateOutlined /><div><Text strong>{creditLinkCopy}</Text><Text type="secondary">合同将始终以已生效的信用审核条件为准，提交前可在下一步查看额度、账期和付款条件。</Text></div></div>}
+          {creditWarning && <Alert type="warning" showIcon message="该客户暂无可用的已生效信用审核版本" description={<Space direction="vertical" size={4}><span>合同不能直接进入正式审查。请先完成客户信用审核审批，再返回发起合同。</span><Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => { window.location.hash = '/credit/new' }}>先发起客户信用审核</Button></Space>} />}
         </section>}
 
         {step === 1 && <section className="request-step-panel">
-          <Typography.Title level={4}>合同信息与信审边界</Typography.Title>
+          <Typography.Title level={4}>合同信息与信用审核条件</Typography.Title>
           <Alert type="info" showIcon message={`当前业务类型：${selectedBusinessType}`} description={businessTypeHint[selectedBusinessType] || businessTypeHint['一般']} style={{ marginBottom: 16 }} />
-          {!credits.length && <Alert type="warning" showIcon style={{ marginBottom: 16 }} message="没有可绑定的有效信审" />}
+          {!credits.length && <Alert type="warning" showIcon style={{ marginBottom: 16 }} message="没有可绑定的有效信用审核版本" />}
           <div className="review-meta-grid case-create-grid">
-            <Form.Item name="credit_case_id" label={credits.length === 1 ? '系统自动关联的信审版本' : '系统推荐的信审版本'} rules={[{ required: true, message: '必须绑定已生效信审版本' }]}><Select placeholder="选择客户已生效的信审版本" options={credits.map(item => ({ value: item.case_id, label: `V${item.version} · 账期≤${item.conditions.max_payment_days}天 · 额度≤${item.conditions.max_credit_amount.toLocaleString()} ${item.conditions.currency}` }))} dropdownRender={menu => <><Button type="link" icon={<SafetyCertificateOutlined />} onClick={() => loadCredits()}>刷新信审版本</Button>{menu}</>} /></Form.Item>
+            <Form.Item name="credit_case_id" label={credits.length === 1 ? '系统自动关联的信用审核版本' : '系统推荐的信用审核版本'} rules={[{ required: true, message: '必须绑定已生效的信用审核版本' }]}><Select placeholder="选择客户已生效的信用审核版本" options={credits.map(item => ({ value: item.case_id, label: `V${item.version} · 账期≤${item.conditions.max_payment_days}天 · 额度≤${item.conditions.max_credit_amount.toLocaleString()} ${item.conditions.currency}` }))} dropdownRender={menu => <><Button type="link" icon={<SafetyCertificateOutlined />} onClick={() => loadCredits()}>刷新信用审核版本</Button>{menu}</>} /></Form.Item>
             <Form.Item name="business_type" label="合同业务类型" rules={[{ required: true }]}><Select options={['一般', '模塑一体', 'TKM', 'TKP', '采购订单'].map(value => ({ value, label: value }))} /></Form.Item>
             <Form.Item name="priority" label="业务紧急度" rules={[{ required: true }]}><Select options={[{ value: 'low', label: '低' }, { value: 'normal', label: '普通' }, { value: 'high', label: '高' }, { value: 'urgent', label: '紧急' }]} /></Form.Item>
             <Form.Item name="due_at" label="期望完成时间"><DatePicker showTime format="YYYY-MM-DD HH:mm" style={{ width: '100%' }} /></Form.Item>
             <Form.Item name="request_note" label="申请说明" className="request-note-field"><Input.TextArea rows={3} placeholder="说明签约背景、需重点确认的风险或交付要求" /></Form.Item>
           </div>
-          {selectedCredit && <Card size="small" className="credit-boundary-card" title="本合同将遵守的信审边界"><div><span>额度上限 <b>{selectedCredit.conditions.max_credit_amount.toLocaleString()} {selectedCredit.conditions.currency}</b></span><span>最长账期 <b>{selectedCredit.conditions.max_payment_days} 天</b></span><span>最低预付款 <b>{selectedCredit.conditions.min_prepayment_ratio}%</b></span><span>付款方式 <b>{selectedCredit.conditions.allowed_payment_methods.join('、')}</b></span><span>VMI/JIT <b>{selectedCredit.conditions.allow_vmi_jit ? '允许' : '不允许'}</b></span></div></Card>}
+          {selectedCredit && <Card size="small" className="credit-boundary-card" title="本合同将遵守的信用审核条件"><div><span>额度上限 <b>{selectedCredit.conditions.max_credit_amount.toLocaleString()} {selectedCredit.conditions.currency}</b></span><span>最长账期 <b>{selectedCredit.conditions.max_payment_days} 天</b></span><span>最低预付款 <b>{selectedCredit.conditions.min_prepayment_ratio}%</b></span><span>付款方式 <b>{selectedCredit.conditions.allowed_payment_methods.join('、')}</b></span><span>VMI/JIT <b>{selectedCredit.conditions.allow_vmi_jit ? '允许' : '不允许'}</b></span></div></Card>}
         </section>}
 
         {step === 2 && <section className="request-step-panel">

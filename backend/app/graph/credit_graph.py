@@ -495,9 +495,9 @@ def node_materials(state: CreditState) -> CreditState:
     if 'credit_report' not in kinds:
         missing.append({'type': 'credit_report', 'title': '补充第三方信用报告', 'detail': '建议上传评级、征信或工商司法信用报告，并标明报告日期。'})
     if not state.get('exposure'):
-        missing.append({'type': 'exposure_snapshot', 'title': '补充应收与订单敞口', 'detail': '请从 CRM/ERP 同步已出货未收款、已入单金额与最长逾期天数。'})
+        missing.append({'type': 'exposure_snapshot', 'title': '补充应收与订单额度占用数据', 'detail': '请从 CRM/ERP 同步已出货未收款、已入单金额与最长逾期天数。'})
     state['missing_materials'] = missing
-    state['steps'] = [f'材料完整性Agent: 已识别 {len(documents)} 份材料，待补 {len(missing)} 项']
+    state['steps'] = [f'材料完整性检查：已识别 {len(documents)} 份材料，待补 {len(missing)} 项']
     return state
 
 
@@ -526,7 +526,7 @@ def node_prepare_audit(state: CreditState) -> CreditState:
     state['evidence_chunks'] = chunks
     state['audit_trace'] = trace
     state['_audit_manifests'] = manifests
-    state['steps'] = [f'材料画像Agent: 已解析 {len(manifests)}/{len(state.get("documents") or [])} 份材料，形成 {len(chunks)} 个可追溯证据块']
+    state['steps'] = [f'材料内容解析：已解析 {len(manifests)}/{len(state.get("documents") or [])} 份材料，形成 {len(chunks)} 个可追溯依据块']
     return state
 
 
@@ -542,7 +542,7 @@ def node_plan_audit(state: CreditState) -> CreditState:
                   'document_id': '', 'source_ref': '', 'confidence': None})
     state['audit_plan'] = plan
     state['audit_trace'] = trace
-    state['steps'] = [f'信审规划Agent: {plan.get("mode")}；基于实际材料规划 {len(plan.get("tasks") or [])} 项证据审查任务']
+    state['steps'] = [f'Agent 审核计划：{plan.get("mode")}；基于实际材料规划 {len(plan.get("tasks") or [])} 项依据审查任务']
     return state
 
 
@@ -552,7 +552,7 @@ def node_retrieve_audit_evidence(state: CreditState) -> CreditState:
     state['audit_trace'] = [*(state.get('audit_trace') or []), *retrieval_trace]
     qwen_count = sum(1 for item in retrieval_trace if (item.get('value') or {}).get('mode') == 'qwen3-rerank')
     fallback_count = sum(1 for item in retrieval_trace if (item.get('value') or {}).get('mode') == 'lexical_fallback')
-    state['steps'] = [f'证据检索Agent: 执行 {len(task_evidence)} 个动态任务，qwen3-rerank {qwen_count} 项，本地回退 {fallback_count} 项']
+    state['steps'] = [f'依据检索：执行 {len(task_evidence)} 个动态任务，依据排序服务 {qwen_count} 项，本地备用检索 {fallback_count} 项']
     return state
 
 
@@ -639,7 +639,7 @@ def node_extract_facts(state: CreditState) -> CreditState:
     model_label = '本地/内网模型' if financial_llm_mode() == 'local_or_intranet' else '模型（远端替代）'
     agent_verified = sum(1 for item in task_results if item.get('status') == 'verified')
     state['steps'] = [
-        f'财务事实审计Agent(RAG+{model_label}): 解析 {parsed} 份材料，动态任务核验 {agent_verified}/{len(task_results)}，'
+        f'财务事实核验（{model_label}）：解析 {parsed} 份材料，动态任务核验 {agent_verified}/{len(task_results)}，'
         f'旧式RAG+LLM 成功 {llm_successes}/{len(llm_runs)}，提取 {len(merged)} 个结构化事实、{len(state["evidence"])} 条审计证据'
     ]
     return state
@@ -681,7 +681,7 @@ def node_measure(state: CreditState) -> CreditState:
     state['agent_followups'] = followups
     state['missing_materials'] = [*(state.get('missing_materials') or []), *followups]
     state['assessment'] = result
-    state['steps'] = [f"量化模型Agent: 模型评分 {result['scorecard']['score']}/100，信用等级 {result['credit_grade']}，材料覆盖率 {result['scorecard']['coverage']:.0%}，Agent 待核验 {len(followups)} 项"]
+    state['steps'] = [f"Agent 评估：模型评分 {result['scorecard']['score']}/100，信用等级 {result['credit_grade']}，材料覆盖率 {result['scorecard']['coverage']:.0%}，待核验 {len(followups)} 项"]
     return state
 
 
@@ -709,7 +709,7 @@ def node_explain(state: CreditState) -> CreditState:
     # already-scored structured result and is allowed to phrase, not change, it.
     if not configured_llm():
         state['narrative'] = fallback
-        state['steps'] = ['意见生成Agent: 主模型未配置，使用确定性说明模板']
+        state['steps'] = ['Agent 意见生成：Agent 模型未配置，使用确定性说明模板']
         return state
     safe_input = {'assessment': state['assessment'], 'missing_materials': state.get('missing_materials') or []}
     prompt = ('你是企业信审意见生成Agent。仅根据给出的结构化模型结果撰写中文审查摘要；不得增加事实、'
@@ -722,10 +722,10 @@ def node_explain(state: CreditState) -> CreditState:
         if not isinstance(narrative, dict):
             raise ValueError('模型未返回对象')
         state['narrative'] = {**fallback, **{key: narrative[key] for key in ('conclusion', 'summary', 'key_risks', 'next_actions') if key in narrative}, 'generated_by': 'llm_structured'}
-        state['steps'] = ['意见生成Agent: 基于脱离原文的量化结果生成审查摘要']
+        state['steps'] = ['Agent 意见生成：根据 Agent 评估结果生成审查摘要']
     except Exception:
         state['narrative'] = fallback
-        state['steps'] = ['意见生成Agent: 模型调用失败，使用确定性说明模板']
+        state['steps'] = ['Agent 意见生成：模型调用失败，使用确定性说明模板']
     return state
 
 
@@ -744,7 +744,7 @@ def node_report(state: CreditState) -> CreditState:
         # business APIs.  This is provenance, not a selectable mode.
         'runtime_mode': 'production',
     }
-    state['steps'] = ['信审汇总结论Agent: 已形成带模型版本、证据与待补项的审批建议快照']
+    state['steps'] = ['信用审核总结：已形成带模型版本、依据与待补项的审批建议记录']
     return state
 
 
@@ -783,10 +783,10 @@ def node_react_audit(state: CreditState) -> CreditState:
     # the source-evidence list, where browsers previously rendered them as
     # "[object Object]" and obscured the actual verified Claims.
     state['evidence'] = [*(state.get('evidence') or []), *claim_evidence]
-    state['missing_materials'] = [{'type': 'react_agent', 'title': '补充或人工核验信审证据', 'detail': str(item)[:500]}
+    state['missing_materials'] = [{'type': 'react_agent', 'title': '补充或人工核验信用审核依据', 'detail': str(item)[:500]}
                                   for item in audit.get('material_requests') or []]
-    state['steps'] = [f"ReAct 信审Agent: 状态 {audit.get('status')}；已验证 Claim {len(audit.get('claims') or [])} 条；"
-                      f"Agent 工具轮次 {len(audit.get('trace') or [])}"]
+    state['steps'] = [f"Agent 审查：状态 {audit.get('status')}；已核验事实 {len(audit.get('claims') or [])} 条；"
+                      f"处理步骤 {len(audit.get('trace') or [])}"]
     return state
 
 
@@ -795,13 +795,13 @@ def _not_assessable_result(audit: dict[str, Any], exposure: dict[str, Any] | Non
     code = 'AGENT_EXECUTION_FAILED' if status == 'execution_failed' else 'AGENT_EVIDENCE_INSUFFICIENT'
     reason = str(audit.get('reason') or '')
     if status == 'execution_failed' and reason.startswith('agent_call_failed:APITimeoutError'):
-        message = '主审查模型调用超时，系统已自动重试 1 次仍未完成；系统未采用固定匹配替代。'
+        message = 'Agent 审查模型调用超时，系统已自动重试 1 次仍未完成；未采用固定匹配替代。'
     elif status == 'execution_failed' and reason.startswith('agent_call_failed:'):
-        message = '主审查模型调用失败，系统已自动重试 1 次仍未完成；系统未采用固定匹配替代。'
+        message = 'Agent 审查模型调用失败，系统已自动重试 1 次仍未完成；未采用固定匹配替代。'
     elif status == 'execution_failed':
-        message = '生产信审Agent或强制重排服务未能执行，系统未采用固定匹配替代。'
+        message = 'Agent 审查或强制依据排序服务未能执行，未采用固定匹配替代。'
     else:
-        message = '核心主体、期间、口径或财务事实未形成经验证Claim，系统不能给出授信建议。'
+        message = '核心主体、期间、口径或财务事实未完成核验，系统不能给出授信建议。'
     return {
         'business_type': '一般', 'model_status': 'execution_failed' if status == 'execution_failed' else 'not_assessable',
         'credit_grade': 'UNASSESSABLE',
@@ -823,7 +823,7 @@ def node_production_measure(state: CreditState) -> CreditState:
     else:
         result = _not_assessable_result(audit, state.get('exposure'))
     state['assessment'] = result
-    state['steps'] = [f"生产政策引擎: {result['model_status']}；只有 verified Claim 齐全时才执行评分与额度计算"]
+    state['steps'] = [f"政策检查：{result['model_status']}；只有关键事实全部核验通过时才执行评分与额度计算"]
     return state
 
 

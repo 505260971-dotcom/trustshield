@@ -81,7 +81,7 @@ export default function EvidencePreview({ documents, documentPreview, selectedDo
     <div className="credit-preview-heading">
       <div>
         <Text strong><FileTextOutlined /> 材料原文与证据定位</Text>
-        <Text type="secondary">Agent 读取到的来源会在下方高亮；点击来源标签可跳到对应材料行。</Text>
+        <Text type="secondary">系统使用的依据会在下方高亮；点击来源标签可跳到对应材料行。</Text>
       </div>
       <Tag color={markedCount ? 'gold' : 'default'} icon={<HighlightOutlined />}>{markedCount ? `已标注 ${markedCount} 行` : '等待来源'}</Tag>
     </div>
@@ -92,11 +92,11 @@ export default function EvidencePreview({ documents, documentPreview, selectedDo
         style={{ minWidth: 250, flex: '1 1 250px' }}
         options={documents.map(item => ({ value: item.document_id, label: `${documentTypeText[item.document_type] || item.document_type} · ${item.original_name}` }))}
         onChange={onSelectDocument}
-        notFoundContent="暂无信审材料"
+        notFoundContent="暂无信用审核材料"
       />
       {selectedDocument && <Text type="secondary">{documentPreview?.total ?? selectedDocument.text_record_count ?? 0} 个来源记录 · {documentPreview?.status === 'partial' ? '部分页面待 OCR' : documentPreview?.status === 'failed' ? '解析失败' : '可核验'}</Text>}
     </div>
-    {loading ? <div className="credit-preview-loading"><Spin tip="正在读取材料文字资产…" /></div> : !documents.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先上传财报、信用报告或交易材料" /> : !records.length ? <div className="credit-preview-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={documentPreview?.error || '当前材料没有可展示的文字记录'} /></div> : <div className="credit-preview-scroll">
+    {loading ? <div className="credit-preview-loading"><Spin tip="正在读取材料内容…" /></div> : !documents.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先上传财报、信用报告或交易材料" /> : !records.length ? <div className="credit-preview-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={documentPreview?.error || '当前材料没有可展示的文字记录'} /></div> : <div className="credit-preview-scroll">
       {matched.map(({ record, index, anchors: recordAnchors }) => <div
         key={`${record.source_ref}-${index}`}
         ref={node => { recordRefs.current[`${selectedDocumentId}:${index}`] = node }}
@@ -107,7 +107,7 @@ export default function EvidencePreview({ documents, documentPreview, selectedDo
           <Text code>{record.source_ref || `记录 ${index + 1}`}</Text>
           {record.start_page && <Tag>{`第 ${record.start_page} 页`}</Tag>}
           {record.source_kind && <Tag color={record.source_kind === 'ocr' ? 'orange' : record.source_kind === 'table' || record.source_kind === 'sheet' ? 'blue' : 'default'}>{record.source_kind === 'ocr' ? 'OCR' : record.source_kind === 'table' ? '表格' : record.source_kind === 'sheet' ? '工作表' : '正文'}</Tag>}
-          {recordAnchors.map((anchor, sourceIndex) => <Tag key={`${anchor.chunk_id || anchor.source_ref}-${sourceIndex}`} color="gold" icon={<LinkOutlined />} onClick={event => { event.stopPropagation(); onSelectAnchor?.(anchor) }}>{anchor.source_ref || anchor.chunk_id || 'Agent 来源'}</Tag>)}
+          {recordAnchors.map((anchor, sourceIndex) => <Tag key={`${anchor.chunk_id || anchor.source_ref}-${sourceIndex}`} color="gold" icon={<LinkOutlined />} onClick={event => { event.stopPropagation(); onSelectAnchor?.(anchor) }}>{anchor.source_ref || anchor.chunk_id || '查看来源'}</Tag>)}
         </div>
         <div className="credit-preview-record-text">{highlightText(record.text, recordAnchors.map(anchor => anchor.evidence_quote || anchor.preview || ''))}</div>
       </div>)}

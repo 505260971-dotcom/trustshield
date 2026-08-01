@@ -67,7 +67,7 @@ def translate_clauses(clauses, mapping, target_lang='en', on_step=None, limit=60
                         'translated_masked': translated_masked,
                         'translated': restore_text(translated_masked, mapping),
                         'mask_restored': any(token in translated_masked for token in mapping)})
-        if on_step: on_step(f'翻译Agent: 批次 {i//batch+1} 完成 ({len(out)}/{len(picks)} 条)')
+        if on_step: on_step(f'翻译 Agent：第 {i//batch+1} 批完成（{len(out)}/{len(picks)} 条）')
     return out
 
 def run_translate(report, target_lang='en', mapping=None, on_step=None):
@@ -77,8 +77,8 @@ def run_translate(report, target_lang='en', mapping=None, on_step=None):
     if not mapping:
         raise ValueError('该合同的脱敏映射不存在或已过期，已拒绝将原文发送至翻译模型')
     clauses = report.get('clauses', []) or []
-    if on_step: on_step(f'翻译Agent: 开始翻译为 {LANG_NAME.get(target_lang,target_lang)},共 {min(len(clauses),60)} 条')
+    if on_step: on_step(f'翻译 Agent：开始翻译为 {LANG_NAME.get(target_lang,target_lang)}，共 {min(len(clauses),60)} 条')
     translated = translate_clauses(clauses, mapping, target_lang, on_step)
-    if on_step: on_step('翻译Agent: 完成；敏感令牌已在服务端恢复')
+    if on_step: on_step('翻译 Agent：已完成，敏感信息已在服务端恢复')
     return {'target_lang': target_lang, 'target_lang_name': LANG_NAME.get(target_lang, target_lang),
             'translated': translated, 'contract_fields_translated': {}}

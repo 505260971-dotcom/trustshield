@@ -160,7 +160,7 @@ def recommend_conditions(requested: dict[str, Any], facts: dict[str, Any], expos
                            'message': f'财报金额口径为 {financial_currency}，申请授信币种为 {requested_currency}；未提供经批准汇率，不能自动换算授信额度。'})
     if exposure_currency and requested_currency and exposure_currency != requested_currency:
         risk_flags.append({'code': 'EXPOSURE_CURRENCY_MISMATCH', 'level': 'high',
-                           'message': f'应收/订单敞口币种为 {exposure_currency}，申请授信币种为 {requested_currency}；未提供经批准汇率，不能自动计算可用额度。'})
+                           'message': f'应收和订单额度占用的币种为 {exposure_currency}，申请授信币种为 {requested_currency}；未提供经批准汇率，不能自动计算可用额度。'})
 
     can_recommend = not risk_flags and revenue > 0 and requested_limit > 0
     revenue_cap = revenue * float(grade.get('revenue_cap_ratio', 0))
@@ -174,18 +174,18 @@ def recommend_conditions(requested: dict[str, Any], facts: dict[str, Any], expos
         recommended_days = min(requested_days, 90)
         recommended_prepay = requested_prepay
         if requested_days > 90:
-            policy_exceptions.append('TKP 账期超过 Net 90，须上传市场总监特别账期批核依据。')
+            policy_exceptions.append('TKP 账期超过 Net 90，须上传市场总监特别账期审批依据。')
     elif lane == 'TKM':
         recommended_days = min(requested_days or 365, 365)
         recommended_prepay = max(requested_prepay, 60.0)
         if requested_prepay < 60:
-            policy_exceptions.append('TKM 走模前收款低于 60%，须按尾期放账比例/特别信用申请专项审批。')
+            policy_exceptions.append('TKM 模具交付前收款低于 60%，须按尾款放账比例或特别信用申请进行专项审批。')
     else:
         recommended_days = requested_days
         recommended_prepay = requested_prepay
 
     if requested_limit and current_exposure + requested_limit > recommended_limit and recommended_limit > 0:
-        risk_flags.append({'code': 'EXPOSURE_CAP', 'level': 'mid', 'message': '现有应收与已入单敞口叠加申请额度可能超过模型建议信用额。'})
+        risk_flags.append({'code': 'EXPOSURE_CAP', 'level': 'mid', 'message': '现有应收与已入单额度占用叠加申请额度后，可能超过模型建议的信用额度。'})
     return {
         'business_type': lane, 'model_status': 'ready_for_reviewer' if can_recommend else 'needs_material_or_manual_review',
         'credit_grade': grade['grade'], 'scorecard': scorecard, 'risk_flags': risk_flags,

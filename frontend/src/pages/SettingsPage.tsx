@@ -50,7 +50,7 @@ export default function SettingsPage({ onSaved }: Props) {
     try {
       const prefix = kind === 'llm' ? 'llm' : 'mask_llm'
       const result = await api.testAdminSettings({ kind, api_base: values[`${prefix}_api_base`], api_key: values[`${prefix}_api_key`], model: values[`${prefix}_model`] })
-      if (result.ok) message.success(`${kind === 'llm' ? '主审查模型' : '脱敏模型'}连接成功（${result.latency_ms} ms）`)
+      if (result.ok) message.success(`${kind === 'llm' ? 'Agent 审查模型' : '合同脱敏模型'}连接成功（${result.latency_ms} ms）`)
       else message.warning(result.message || '连接失败')
     } catch (error: any) { message.error(`连接测试失败：${error?.message || '请求失败'}`) } finally { setTesting(null) }
   }
@@ -60,21 +60,21 @@ export default function SettingsPage({ onSaved }: Props) {
   return <Form className="role-page settings-page" form={form} layout="vertical" onFinish={save} initialValues={settings}>
     <section className="page-hero page-hero-light settings-hero">
       <div><Typography.Title level={2}>系统设置</Typography.Title></div>
-      <div className="page-hero-actions"><Tag color={settings.llm_api_key_configured ? 'green' : 'orange'}>{settings.llm_api_key_configured ? '主模型已配置' : '主模型待配置'}</Tag></div>
+      <div className="page-hero-actions"><Tag color={settings.llm_api_key_configured ? 'green' : 'orange'}>{settings.llm_api_key_configured ? 'Agent 审查模型已配置' : 'Agent 审查模型待配置'}</Tag></div>
     </section>
 
     {requiresRestart && <Alert type="warning" showIcon message="配置已保存，重启后端后生效" style={{ marginBottom: 16 }} />}
 
     <Row gutter={[16, 16]}>
       <Col xs={24} xl={12}>
-        <Card title={<Space><ApiOutlined />主审查模型</Space>} extra={<Button icon={<ExperimentOutlined />} loading={testing === 'llm'} onClick={() => test('llm')}>测试连接</Button>}>
+        <Card title={<Space><ApiOutlined />Agent 审查模型</Space>} extra={<Button icon={<ExperimentOutlined />} loading={testing === 'llm'} onClick={() => test('llm')}>测试连接</Button>}>
           <Form.Item name="llm_api_base" label="OpenAI 兼容 API 地址"><Input placeholder="https://your-provider.example/v1" /></Form.Item>
           <Form.Item name="llm_model" label="模型名称" rules={[{ max: 200 }]}><Input placeholder="例如 qwen-plus、deepseek-chat" /></Form.Item>
           <Form.Item name="llm_api_key" label={<Space>API Key {settings.llm_api_key_configured && <Tag color="green">已配置</Tag>}</Space>}><Input.Password placeholder={settings.llm_api_key_configured ? '已配置，留空保持不变' : '输入模型服务 API Key'} /></Form.Item>
         </Card>
       </Col>
       <Col xs={24} xl={12}>
-        <Card title={<Space><SafetyCertificateOutlined />脱敏模型</Space>} extra={<Button icon={<ExperimentOutlined />} loading={testing === 'mask'} onClick={() => test('mask')}>测试连接</Button>}>
+        <Card title={<Space><SafetyCertificateOutlined />合同脱敏模型</Space>} extra={<Button icon={<ExperimentOutlined />} loading={testing === 'mask'} onClick={() => test('mask')}>测试连接</Button>}>
           <Form.Item name="enable_masking" label="启用合同脱敏" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item>
           <Form.Item name="smart_mask" label="使用模型脱敏" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item>
           <Form.Item name="mask_llm_api_base" label="OpenAI 兼容 API 地址"><Input placeholder="https://your-provider.example/v1" /></Form.Item>

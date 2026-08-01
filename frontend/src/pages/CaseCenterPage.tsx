@@ -18,7 +18,7 @@ export default function CaseCenterPage({onCreate,onOpen,canCreateContract}:{onCr
   const columns=useMemo(()=>[
     {title:'客户 / 合同',key:'case',render:(_:unknown,r:CaseCenterItem)=><Button type="link" style={{padding:0,textAlign:'left'}} onClick={()=>onOpen(r.case_id)}><b>{r.customer_name}</b><br/><span className="case-id">{r.filename||'待上传合同'} · {r.case_id}</span></Button>},
     {title:'阶段',dataIndex:'current_stage',width:130,render:(v:string)=>{const meta=stageInfo(v);return <Tag color={meta.color}>{meta.label}</Tag>}},
-    {title:'AI 结论',dataIndex:'overall_level',width:170,render:(v:string)=>{const meta=aiConclusionInfo(v);return <Space direction="vertical" size={0}><Tag color={meta.color}>{meta.label}</Tag><Text type="secondary" style={{fontSize:11}}>{meta.description}</Text></Space>}},
+    {title:'Agent 审查结论',dataIndex:'overall_level',width:170,render:(v:string)=>{const meta=aiConclusionInfo(v);return <Space direction="vertical" size={0}><Tag color={meta.color}>{meta.label}</Tag><Text type="secondary" style={{fontSize:11}}>{meta.description}</Text></Space>}},
     {title:'下一步',width:190,render:(_:unknown,r:CaseCenterItem)=>{const meta=stageInfo(r.current_stage);return <Space direction="vertical" size={0}><Text strong style={{fontSize:12}}>{meta.action}</Text><Text type="secondary" style={{fontSize:11}}>{meta.description}</Text></Space>}},
     {title:'待办',dataIndex:'open_tasks',width:80,render:(v:number)=><Tag color={v?'blue':'default'}>{v}</Tag>},
     {title:'负责人',dataIndex:'assignee_name',width:120,render:(v:string)=>v||'待领取'},
@@ -32,7 +32,7 @@ export default function CaseCenterPage({onCreate,onOpen,canCreateContract}:{onCr
   const ready=items.filter(item=>item.current_stage==='ready_to_sign').length
   return <div className="role-page case-center-page">
     <section className="page-hero page-hero-light">
-      <div><span className="section-kicker">CASE OPERATIONS</span><Typography.Title level={2}>合同案件中心</Typography.Title><Typography.Paragraph>以案件为单位串联合同文件、信审前置、AI 审查、补件与分级审批。先处理有待办的案件，再关注可签约和高优先级事项。</Typography.Paragraph></div>
+      <div><span className="section-kicker">案件管理</span><Typography.Title level={2}>合同案件中心</Typography.Title><Typography.Paragraph>以案件为单位管理合同文件、信用审核条件、Agent 审查、补充材料和分级审批。先处理有待办的案件，再关注可签约和高优先级事项。</Typography.Paragraph></div>
       <div className="page-hero-actions"><Segmented value={scope} onChange={v=>setScope(v as any)} options={[{label:'全部案件',value:'all'},{label:'与我相关',value:'mine'},{label:'我的待办',value:'inbox'}]}/><Space wrap><Button icon={<ReloadOutlined/>} onClick={load}>刷新队列</Button>{canCreateContract&&<Button type="primary" icon={<FileAddOutlined/>} onClick={onCreate}>发起申请</Button>}</Space></div>
     </section>
     <section className="compact-metrics" aria-label="案件概览">

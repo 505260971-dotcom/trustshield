@@ -118,7 +118,7 @@ def _json(content: Any) -> dict[str, Any]:
         value = value[start:end + 1]
     data = json.loads(value)
     if not isinstance(data, dict):
-        raise ValueError('ReAct Agent 未返回 JSON 对象')
+        raise ValueError('Agent 审查服务未返回有效结果')
     return data
 
 
@@ -182,23 +182,23 @@ def _financial_context_evidence(raw: dict[str, Any], chunks: dict[str, dict[str,
         supplied = [{'evidence_id': raw.get('evidence_id') or raw.get('source_chunk_id') or raw.get('source_ref'),
                      'evidence_quote': raw.get('evidence_quote')}]
     if not isinstance(supplied, list) or not supplied or len(supplied) > 4:
-        return [], '财务口径Claim需提供一至四条同页来源引文'
+        return [], '财务口径事实需要提供一至四条同页来源引文'
     refs: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in supplied:
         if not isinstance(item, dict):
-            return [], '财务口径Claim的来源引文格式无效'
+            return [], '财务口径事实的来源引文格式无效'
         evidence_id = _visible_evidence_id(item, chunks)
         chunk = chunks.get(evidence_id)
         quote = str(item.get('evidence_quote') or '')
         if not evidence_id or evidence_id in seen or not _quote_ok(quote, chunk):
-            return [], '财务口径Claim存在重复、不可见或无法在来源块定位的引文'
+            return [], '财务口径事实存在重复、不可见或无法在来源块定位的引文'
         seen.add(evidence_id)
         refs.append({'evidence_id': evidence_id, 'quote': quote[:500], 'chunk': chunk})
     document_ids = {str(item['chunk'].get('document_id') or '') for item in refs}
     pages = {item['chunk'].get('page') for item in refs}
     if len(document_ids) != 1 or '' in document_ids or len(pages) != 1 or None in pages:
-        return [], '财务口径Claim的多来源证据必须来自同一文档同一页'
+        return [], '财务口径事实的多来源依据必须来自同一文档同一页'
     return refs, ''
 
 
@@ -237,7 +237,7 @@ def _validate_claims(raw_claims: list[Any], chunks: dict[str, dict[str, Any]], c
             entity = str(raw.get('entity_name') or '').strip()
             customer = _normal(case.get('customer_name'))
             if not customer or not entity or customer not in _normal(entity) or _normal(entity) not in _normal(quote):
-                rejected.append({'claim_id': claim_id, 'reason': '主体Claim未能以原文证明与申请客户一致'})
+                rejected.append({'claim_id': claim_id, 'reason': '主体事实未能以原文证明与申请客户一致'})
                 continue
             valid.append(base | {'entity_name': entity})
         elif kind == 'financial_context':
@@ -247,7 +247,7 @@ def _validate_claims(raw_claims: list[Any], chunks: dict[str, dict[str, Any]], c
             unit = _enum_alias(raw.get('source_unit'), _UNIT_ALIASES)
             if (_normal(case.get('customer_name')) not in _normal(entity) or _normal(entity) not in _normal(quote) or not period or scope not in {'consolidated', 'standalone'}
                     or currency not in {'CNY', 'HKD', 'USD'} or unit not in _MULTIPLIER):
-                rejected.append({'claim_id': claim_id, 'reason': '财务口径Claim缺主体、期间、合并范围、币种或单位'})
+                rejected.append({'claim_id': claim_id, 'reason': '财务口径事实缺少主体、期间、合并范围、币种或单位'})
                 continue
             quote_normal = _normal(quote)
             scope_words = ('合并', 'consolidated') if scope == 'consolidated' else ('单体', 'standalone', 'separate')
@@ -258,7 +258,7 @@ def _validate_claims(raw_claims: list[Any], chunks: dict[str, dict[str, Any]], c
             if (_normal(period) not in quote_normal or not any(word in quote_normal for word in scope_words)
                     or not any(_normal(word) in quote_normal for word in currency_words)
                     or not any(_normal(word) in quote_normal for word in unit_words)):
-                rejected.append({'claim_id': claim_id, 'reason': '财务口径Claim的同页来源引文未共同证明期间、口径、币种和单位'})
+                rejected.append({'claim_id': claim_id, 'reason': '财务口径事实的同页来源引文未共同证明期间、口径、币种和单位'})
                 continue
             years = [int(item) for item in re.findall(r'20\d{2}', period)]
             if not years or datetime.now().year - max(years) > CREDIT_AUDIT_MAX_FINANCIAL_AGE_YEARS:
@@ -279,14 +279,14 @@ def _validate_claims(raw_claims: list[Any], chunks: dict[str, dict[str, Any]], c
             number = _number_ok(raw.get('value'), chunk)
             context = accepted.get(context_id) or next((item for item in valid if item.get('claim_id') == context_id), None)
             if metric not in CORE_METRICS or number is None or not context or context.get('type') != 'financial_context':
-                rejected.append({'claim_id': claim_id, 'reason': '指标未获来源数值或有效财务口径Claim支持'})
+                rejected.append({'claim_id': claim_id, 'reason': '指标未获得来源数值或有效财务口径事实支持'})
                 continue
             normalized = number * _MULTIPLIER[context['source_unit']]
             same_metric = next((item for item in [*accepted.values(), *valid]
                                 if item.get('type') == 'financial_metric' and item.get('metric') == metric
                                 and item.get('context_id') == context_id), None)
             if same_metric:
-                reason = '同一财务口径下的指标与已验证Claim数值冲突' if float(same_metric.get('value') or 0) != normalized else '同一财务口径下的指标Claim重复'
+                reason = '同一财务口径下的指标与已核验事实数值冲突' if float(same_metric.get('value') or 0) != normalized else '同一财务口径下的指标事实重复'
                 rejected.append({'claim_id': claim_id, 'reason': reason, 'conflicts_with': same_metric.get('claim_id')})
                 continue
             valid.append(base | {'metric': metric, 'source_value': number, 'value': normalized, 'context_id': context_id,
@@ -299,7 +299,7 @@ def _validate_claims(raw_claims: list[Any], chunks: dict[str, dict[str, Any]], c
                 continue
             valid.append(base | {'category': str(raw.get('category') or 'other')[:50], 'summary': summary[:600]})
         else:
-            rejected.append({'claim_id': claim_id, 'reason': '不支持的Claim类型'})
+            rejected.append({'claim_id': claim_id, 'reason': '不支持的事实类型'})
     return valid, rejected, facts
 
 
@@ -328,7 +328,7 @@ def _completion(accepted: dict[str, dict[str, Any]], exposure: dict[str, Any] | 
                            and time.time() - float(exposure.get('as_of')) <= CREDIT_AUDIT_MAX_EXPOSURE_AGE_DAYS * 86400)
     except (AttributeError, TypeError, ValueError):
         exposure_ok = False
-    if not exposure_ok: missing.append('有效期内且有币种的 ERP/CRM 敞口快照')
+    if not exposure_ok: missing.append('有效期内且有币种的 ERP/CRM 额度占用数据')
     facts: dict[str, Any] = {}
     if complete_context_id:
         metrics = metrics_by_context[complete_context_id]
@@ -363,12 +363,12 @@ def _controller_instruction(progress: dict[str, Any], step: int, max_steps: int,
     """A convergence guardrail, not a source-data or fact-producing shortcut."""
     remaining = max_steps - step + 1
     if tool_rounds_without_claim >= 4 and not progress['verified_claim_count']:
-        return ('收敛检查：你已连续进行了多轮工具读取但尚未提交任何 Claim。请基于已可见来源块优先提交能够逐字引用的主体、'
-                '财务口径或指标 Claim；若来源确实不能证明某项，只请求具体补件。不要重复相同检索或页面读取。')
+        return ('收敛检查：你已连续进行了多轮工具读取但尚未提交任何事实。请基于已可见来源块优先提交能够逐字引用的主体、'
+                '财务口径或指标事实；若来源确实不能证明某项，只请求具体补充材料。不要重复相同检索或页面读取。')
     if remaining <= 4:
         return (f'剩余 {remaining} 步。请先检查已验证覆盖：主体={progress["identity_verified"]}，'
                 f'财务口径={progress["financial_context_verified"]}，缺少指标={"、".join(progress["missing_metrics"]) or "无"}。'
-                '下一步应提交有来源的 Claim、读取尚未读取的精确来源，或针对无法证明的事实请求具体补件；不得用泛化搜索消耗剩余步数。')
+                '下一步应提交有来源的事实、读取尚未读取的精确来源，或针对无法证明的事实请求具体补充材料；不得用泛化搜索消耗剩余步数。')
     return ''
 
 
@@ -396,11 +396,11 @@ def _tool_result_summary(observation: dict[str, Any]) -> str:
     if tool == 'get_document_outline':
         return 'get_document_outline：已读取文档结构与来源类型分布'
     if tool == 'inspect_exposure_snapshot':
-        return 'inspect_exposure_snapshot：已读取只读 CRM/ERP 敞口快照'
+        return '已读取只读 CRM/ERP 额度占用数据'
     if tool == 'list_verified_claims':
-        return f"list_verified_claims：当前已有 {len(observation.get('claims') or [])} 条已验证 Claim"
+        return f"当前已有 {len(observation.get('claims') or [])} 条已核验事实"
     if tool == 'compare_claims':
-        return f"compare_claims：返回 {len(observation.get('claims') or [])} 条已验证 Claim"
+        return f"已返回 {len(observation.get('claims') or [])} 条已核验事实"
     return tool or '已完成工具调用'
 
 
@@ -453,7 +453,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
     requests: list[str] = []
     if not (CREDIT_AUDIT_AGENT_ENABLED and configured_financial_llm()):
         return {'status': 'execution_failed', 'reason': 'financial_audit_agent_not_configured', 'facts': {}, 'claims': [], 'trace': trace,
-                'material_requests': ['财务审计Agent未配置；生产环境未执行固定材料匹配。'], 'manifests': manifests,
+                'material_requests': ['Agent 审查服务未配置；正式环境未执行固定材料匹配。'], 'manifests': manifests,
                 'evidence_sources': []}
     messages = [SystemMessage(content=_system_prompt()), HumanMessage(content=json.dumps({
         'case': {'customer_name': case.get('customer_name'), 'business_type': case.get('business_type'), 'requested_conditions': case.get('conditions') or {}},
@@ -535,7 +535,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
         _emit({'type': 'agent_action', 'step': step, 'action': name, 'tool': tool_name,
                'reason_summary': trace[-1]['reason_summary'], 'arguments': trace[-1]['arguments'],
                'progress': progress_before,
-               'message': f'Agent 第 {step} 轮：{tool_name or trace[-1]["action"]}'})
+               'message': f'Agent 审查第 {step} 步：{tool_name or trace[-1]["action"]}'})
         observation: dict[str, Any]
         if name == 'tool':
             tool = tool_name
@@ -629,7 +629,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
             observation = {'claim_validation': {'accepted': valid, 'rejected': rejected, 'missing_required': missing, 'ready_for_policy': ready}}
             trace[-1]['observation'] = {'accepted_claim_ids': [item['claim_id'] for item in valid], 'rejected': rejected, 'missing_required': missing}
             trace[-1]['claim_shape'] = _claim_shape(raw_claims)
-            trace[-1]['result_summary'] = f"提交 {len(raw_claims)} 条 Claim；通过 {len(valid)} 条，拒绝 {len(rejected)} 条"
+            trace[-1]['result_summary'] = f"提交 {len(raw_claims)} 条事实；核验通过 {len(valid)} 条，未通过 {len(rejected)} 条"
             trace[-1]['progress_after'] = _claim_progress(accepted)
             claim_source_ids = {str(item.get('evidence_id') or item.get('source_chunk_id') or '') for item in valid}
             _emit({'type': 'claim_validated', 'step': step, 'result_summary': trace[-1]['result_summary'],
@@ -645,7 +645,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
         if name == 'request_materials':
             requests.extend(str(item)[:500] for item in action.get('material_requests') or [] if str(item).strip())
             ready, missing, facts = _completion(accepted, exposure)
-            trace[-1]['result_summary'] = f"请求 {len(action.get('material_requests') or [])} 项补件；当前可评分={ready}"
+            trace[-1]['result_summary'] = f"请求 {len(action.get('material_requests') or [])} 项补充材料；当前是否具备评估条件={ready}"
             trace[-1]['progress_after'] = _claim_progress(accepted)
             _emit({'type': 'request_materials', 'step': step, 'result_summary': trace[-1]['result_summary'],
                    'requests': list(dict.fromkeys(requests)), 'progress': trace[-1]['progress_after'],
@@ -655,7 +655,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
                     'evidence_sources': list(observed_sources.values())}
         if name == 'finish':
             ready, missing, facts = _completion(accepted, exposure)
-            trace[-1]['result_summary'] = f"结束审计；当前可评分={ready}"
+            trace[-1]['result_summary'] = f"审查结束；当前是否具备评估条件={ready}"
             trace[-1]['progress_after'] = _claim_progress(accepted)
             _emit({'type': 'finish', 'step': step, 'result_summary': trace[-1]['result_summary'],
                    'progress': trace[-1]['progress_after'], 'message': trace[-1]['result_summary']})
@@ -663,7 +663,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
                     'facts': facts if ready else {}, 'claims': list(accepted.values()), 'trace': trace,
                     'material_requests': list(dict.fromkeys([*requests, *missing])), 'observations': observations, 'manifests': manifests,
                     'evidence_sources': list(observed_sources.values())}
-        trace[-1]['result_summary'] = '无效 Agent 动作；已要求重新选择受支持操作'
+        trace[-1]['result_summary'] = '无效操作；已要求重新选择支持的操作'
         _emit({'type': 'invalid_action', 'step': step, 'result_summary': trace[-1]['result_summary'],
                'message': trace[-1]['result_summary']})
         messages.append(HumanMessage(content=json.dumps({'tool_observation': {'error': 'invalid_action'}}, ensure_ascii=False)))

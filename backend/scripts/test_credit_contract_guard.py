@@ -79,9 +79,9 @@ def main():
     finding = store.list_findings('credit-review-1')[0]
     try:
         store.record_finding_action('credit-review-1', finding['finding_id'], 'ignore', '想在合同端放行', admin)
-        raise AssertionError('信审越界不应允许在合同端忽略')
+        raise AssertionError('不符合信用审核条件的问题不应允许在合同端忽略')
     except ValueError as exc:
-        assert '信审越界' in str(exc)
+        assert '不符合信用审核条件' in str(exc)
     assert store.contract_credit_binding('credit-review-1')['version'] == 1
 
     # A commercial relaxation must produce a new credit version.  The old

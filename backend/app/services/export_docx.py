@@ -226,7 +226,7 @@ def export_revised_docx(report, out_path, mode='revised', source_path='', transl
 
     # 审查链路
     if report.get('steps'):
-        _heading(doc, '四、审查链路（多 Agent 协同）', level=1)
+        _heading(doc, '四、Agent 审查步骤与处理记录', level=1)
         for i, st in enumerate(report.get('steps', []), 1):
             doc.add_paragraph(f'{i}. {st}')
     doc.save(out_path)

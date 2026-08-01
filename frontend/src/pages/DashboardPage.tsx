@@ -23,14 +23,14 @@ export default function DashboardPage ({ refreshKey, onCreate, onCases }: { refr
         <Col xs={24} sm={12} xl={6}><Card><Statistic title="我的待办" value={s.my_open} prefix={<AuditOutlined/>}/></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title="待领取案件" value={s.unassigned} prefix={<TeamOutlined/>}/></Card></Col>
         <Col xs={24} sm={12} xl={6}><Card><Statistic title="48 小时内到期" value={s.due_soon} prefix={<ClockCircleOutlined/>} valueStyle={{color:s.due_soon?'#d46b08':undefined}}/></Card></Col>
-        <Col xs={24} sm={12} xl={6}><Card><Statistic title="阻断级结论" value={s.blocked} prefix={<WarningOutlined/>} valueStyle={{color:'#cf1322'}}/></Card></Col>
+        <Col xs={24} sm={12} xl={6}><Card><Statistic title="无法直接放行" value={s.blocked} prefix={<WarningOutlined/>} valueStyle={{color:'#cf1322'}}/></Card></Col>
       </Row>
       <Row gutter={16} style={{marginTop:16}}>
         <Col xs={24} xl={10}><Card title="团队审查概览">
-          <Row><Col span={8}><Statistic title="已发起" value={s.total} prefix={<FileSearchOutlined/>}/></Col><Col span={8}><Statistic title="已完成 AI 审查" value={s.done} valueStyle={{color:'#389e0d'}}/></Col><Col span={8}><Statistic title="高风险条款" value={s.high} valueStyle={{color:'#cf1322'}}/></Col></Row>
+          <Row><Col span={8}><Statistic title="已发起" value={s.total} prefix={<FileSearchOutlined/>}/></Col><Col span={8}><Statistic title="已完成 Agent 审查" value={s.done} valueStyle={{color:'#389e0d'}}/></Col><Col span={8}><Statistic title="高风险条款" value={s.high} valueStyle={{color:'#cf1322'}}/></Col></Row>
           <div style={{height:18}}/><Text type="secondary">中风险条款累计 {s.mid} 条；所有风险处置、导出及审批操作会写入审计日志。</Text>
         </Card></Col>
-        <Col xs={24} xl={14}><Card title="高频命中合同底限 Top 10">
+        <Col xs={24} xl={14}><Card title="最常命中的合同底线规则（前 10）">
           {topRules.length ? topRules.map(([rid, v])=> (
             <div key={rid} style={{marginBottom:8}}>
               <Text style={{width:60, display:'inline-block'}}>{rid}</Text>

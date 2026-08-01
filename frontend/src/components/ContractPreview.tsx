@@ -54,10 +54,10 @@ export default function ContractPreview({ filename, records, anchors, activeAnch
 
   return <div className="contract-preview-panel">
     <div className="contract-preview-heading">
-      <div><Text strong><FileTextOutlined /> 原合同与证据定位</Text><Text type="secondary">Agent 读取或风险引用的合同来源，会在原文中高亮并保留下划线。</Text></div>
+      <div><Text strong><FileTextOutlined /> 合同原文与依据定位</Text><Text type="secondary">系统使用或风险引用的合同内容，会在原文中高亮显示并保留下划线。</Text></div>
       <Tag color={markedCount ? 'gold' : 'default'} icon={<HighlightOutlined />}>{markedCount ? `已标注 ${markedCount} 段` : '等待证据'}</Tag>
     </div>
-    <div className="contract-preview-meta"><Text strong>{filename || '原合同'}</Text><Text type="secondary">{records.length} 个解析记录</Text></div>
+    <div className="contract-preview-meta"><Text strong>{filename || '原合同'}</Text><Text type="secondary">{records.length} 条原文记录</Text></div>
     {loading ? <div className="contract-preview-loading"><Spin tip="正在读取合同原文…" /></div> : !records.length ? <div className="contract-preview-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={error || '暂时没有可展示的合同原文'} /></div> : <div className="contract-preview-scroll">
       {matched.map(({ record, index, anchors: recordAnchors }) => <div
         key={`${record.source_ref || 'record'}-${index}`}

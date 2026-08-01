@@ -7,10 +7,10 @@ import type { TranslateItem, TranslateResult } from '../types'
 const { Text } = Typography
 
 const LANGS = [
-  { value: 'en', label: '英语 English' },
-  { value: 'vi', label: '越南语 Tiếng Việt' },
-  { value: 'ja', label: '日本語 Japanese' },
-  { value: 'es', label: 'Español 西班牙语' }
+  { value: 'en', label: '英语' },
+  { value: 'vi', label: '越南语' },
+  { value: 'ja', label: '日语' },
+  { value: 'es', label: '西班牙语' }
 ]
 
 export default function TranslateModal ({ jobId, open, onClose, onTranslated }: {
@@ -32,7 +32,7 @@ export default function TranslateModal ({ jobId, open, onClose, onTranslated }: 
   }, [open])
 
   const start = async (force=false) => {
-    if (!jobId) { setErr('缺少任务 ID（job_id），无法翻译'); return }
+    if (!jobId) { setErr('缺少任务编号，无法翻译'); return }
     setRunning(true); setSteps([]); setResult(null); setErr('')
     try {
       const { tfid } = await api.translateStart(jobId, lang, force)
@@ -48,7 +48,7 @@ export default function TranslateModal ({ jobId, open, onClose, onTranslated }: 
       es.addEventListener('error', (e: any) => {
         try { if (e.data) { setErr('翻译失败：'+String(e.data).slice(0,200)); setRunning(false); es.close(); return } } catch {}
         if (es.readyState === EventSource.CLOSED) { setRunning(false); return }
-        setErr('翻译流中断，请重试'); setRunning(false); es.close()
+        setErr('翻译过程被中断，请重试'); setRunning(false); es.close()
       })
     } catch (e: any) {
       setErr('提交失败：'+(e?.message||String(e))); setRunning(false)
@@ -82,18 +82,18 @@ export default function TranslateModal ({ jobId, open, onClose, onTranslated }: 
       footer={[
         <Button key="c" onClick={close}>关闭</Button>,
         result ? <Button key="b" icon={<FileWordOutlined/>} loading={exporting} onClick={exportBilingual}>导出双语对照稿</Button> : null,
-        result ? <Button key="r" onClick={()=>start(true)} loading={running}>强制重译</Button> : null,
+        result ? <Button key="r" onClick={()=>start(true)} loading={running}>重新翻译</Button> : null,
         <Button key="s" type="primary" loading={running} disabled={!jobId} onClick={()=>start(false)}>开始翻译</Button>
       ].filter(Boolean)}>
       <Alert type="info" showIcon style={{marginBottom:12}}
-        message="翻译前会用审查时的脱敏映射重建令牌；远程模型只见 <MASK-...>，译文在本机还原后持久化，可一键导出段落后插入译文的双语稿。" />
+        message="翻译前会自动隐藏合同中的敏感信息；外部模型只会看到替代标记，翻译完成后系统会在本地恢复并保存结果。" />
       <Space style={{marginBottom:12}}>
         <Text>目标语言：</Text>
         <Select value={lang} onChange={setLang} style={{width:220}} options={LANGS} disabled={running}/>
       </Space>
       {err && <Alert type="error" showIcon message={err} style={{marginBottom:12}}/>}
       {running && <div style={{textAlign:'center', margin:'16px 0'}}><Spin tip="翻译中…"/><Progress percent={Math.min(95, steps.length*8)} status="active" style={{marginTop:12}}/><div style={{marginTop:8}}>{steps.slice(-3).map((s,i)=><div key={i}><Text type="secondary">{s}</Text></div>)}</div></div>}
-      {!running && !result && !err && <Empty description="选择语言后开始翻译；结果会持久化，可供双语导出" />}
+      {!running && !result && !err && <Empty description="选择语言后开始翻译；结果会自动保存，可导出双语文件" />}
       {result && <Table size="small" rowKey="clause_id" columns={cols} dataSource={result.translated as TranslateItem[]} pagination={{pageSize:8}} scroll={{y:360}}/>}
     </Modal>
   )

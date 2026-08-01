@@ -35,7 +35,7 @@ export default function ContractReviewWorkspace({ jobId, report, onStatusChange 
         setStatus(next); statusChangeRef.current?.(next)
         if (next.status === 'running') timer = window.setTimeout(poll, 1000)
       } catch (error: any) {
-        if (!cancelled) message.error(`合同 Agent 进度读取失败：${error?.message || error}`)
+        if (!cancelled) message.error(`合同 Agent 审查进度读取失败：${error?.message || error}`)
       }
     }
     poll()

@@ -58,11 +58,11 @@ def node_ingest(state):
         state['review_scope'] = {'mode': 'incremental', 'changed_clause_ids': [state['clauses'][index]['id'] for index in sorted(changed_indexes)],
                                  'context_clause_ids': [state['clauses'][index]['id'] for index in sorted(scope_indexes - changed_indexes)],
                                  'unchanged_pairs': unchanged_pairs, 'total_clauses': len(state['clauses'])}
-        state.setdefault('steps', []).append(f'版本差异Agent: 变更 {len(changed_indexes)} 条，连同上下文复审 {len(scope_indexes)} / {len(state["clauses"])} 条')
+        state.setdefault('steps', []).append(f'版本差异检查：变更 {len(changed_indexes)} 条，连同上下文复审 {len(scope_indexes)} / {len(state["clauses"])} 条')
     else:
         state['review_clause_ids'] = {item['id'] for item in state['clauses']}
         state['review_scope'] = {'mode': 'full', 'total_clauses': len(state['clauses'])}
-    state.setdefault('steps', []).append(f'文档解析Agent: 切分 {len(r["clauses"])} 条条款')
+    state.setdefault('steps', []).append(f'文档解析：切分 {len(r["clauses"])} 条条款')
     return state
 
 def _normalized_clause(text):
@@ -71,18 +71,18 @@ def _normalized_clause(text):
 def node_mask(state):
     if not (ENABLE_MASKING and state.get('clauses')):
         state['masked_clauses'] = state['clauses']; state['mapping'] = {}
-        state['steps'].append('脱敏Agent: 跳过（未启用）')
+        state['steps'].append('合同脱敏：跳过（未启用）')
         return state
     if SMART_MASK:
         m, mp = mask_clauses_smart(state['clauses'])
         state['masked_clauses'] = m; state['mapping'] = mp
         mode = {'local_ollama': '正则+本地专用模型', 'remote_proxy': '正则+专用模型（远端替代）',
                 'regex_only': '正则回退（未配置专用模型）'}[masking_model_mode()]
-        state['steps'].append(f'脱敏Agent({mode}): 脱敏 {len(mp)} 个敏感实体')
+        state['steps'].append(f'合同脱敏（{mode}）：已保护 {len(mp)} 个敏感信息')
     else:
         m, mp = mask_clauses(state['clauses'])
         state['masked_clauses'] = m; state['mapping'] = mp
-        state['steps'].append(f'脱敏Agent(正则): 脱敏 {len(mp)} 个敏感实体')
+        state['steps'].append(f'合同脱敏（正则）：已保护 {len(mp)} 个敏感信息')
     return state
 
 FIELD_PROMPT = '你是合同字段抽取子Agent。我方=乙方(供方/制造方东江集团)。文本中<MASK-AMOUNT-...>代表已脱敏金额，识别总合同金额时输出该占位符到total_amount_ref，不要猜测原始金额。只输出JSON: {"business_type":"TKM|TKP|模塑一体|一般","our_party":"甲方|乙方","parties":{"甲方":"","乙方":""},"total_amount_ref":"<MASK-...>|null","currency":"USD|HKD|RMB|EUR|...","validity_years":number_or_null,"payment_terms":"简述付款节点"}'
@@ -137,7 +137,7 @@ def node_extract_fields(state):
     state['contract_fields'] = _restore_field_values(_hydrate_masked_amount(f, mapping), mapping)
     if state.get('business_type_hint'):
         state['contract_fields']['business_type'] = state['business_type_hint']
-    state['steps'].append(f'字段抽取Agent: 我方={f.get("our_party")} 业务={f.get("business_type")} 有效期={f.get("validity_years")}')
+    state['steps'].append(f'合同信息提取：我方={f.get("our_party")} 业务={f.get("business_type")} 有效期={f.get("validity_years")}')
     return state
 
 def node_retrieve(state):
@@ -160,7 +160,7 @@ def node_retrieve(state):
         hits[c['id']] = applicable
     state['rule_hits'] = hits
     state['steps'].append(
-        f'规则候选Agent(词法门控): 候选条款 {sum(1 for x in hits.values() if x)} / {len(hits)}，'
+        f'规则候选筛选：候选条款 {sum(1 for x in hits.values() if x)} / {len(hits)}，'
         f'已按业务类型过滤无关底限；不依赖向量检索'
     )
     return state
@@ -309,7 +309,7 @@ def node_judge(state):
     state['semantic_llm_attempts'] = semantic_attempts
     state['semantic_llm_successes'] = semantic_successes
     state['steps'].append(
-        f'研判Agent: 远端语义调用成功 {semantic_successes}/{semantic_attempts}，'
+        f'条款分析：远端语义调用成功 {semantic_successes}/{semantic_attempts}，'
         f'确定性命中 {deterministic_hits} 条（语义窗口≤{_max_analyze(len(clauses))}）'
     )
     return state
@@ -321,27 +321,27 @@ def _number(value):
         return None
 
 def _fact_note(dim, facts, local_note=''):
-    """只校验强模型已抽取的同一法律事实，不再从原文中取最大数字猜测语义。"""
+    """只校验 Agent 已抽取的同一法律事实，不再从原文中取最大数字猜测语义。"""
     if local_note:
         return (True, local_note)
     if dim == 'pay_after_delivery_days':
         days = _number(facts.get('term_days'))
         if days is not None:
-            return (days > 90, f'强模型识别的付款账期 {days:g} 天 > 90 天底线')
+            return (days > 90, f'Agent 识别的付款账期为 {days:g} 天，超过 90 天底线')
     if dim == 'validity_years':
         years = _number(facts.get('validity_years'))
         if years is not None:
-            return (years > 5, f'强模型识别的有效期 {years:g} 年 > 5 年上限')
+            return (years > 5, f'Agent 识别的有效期为 {years:g} 年，超过 5 年上限')
     if dim == 'penalty_ratio':
         ratio = _number(facts.get('penalty_ratio'))
         if ratio is not None:
-            return (ratio > 50, f'强模型识别的违约/赔偿比例 {ratio:g}% > 50%上限')
+            return (ratio > 50, f'Agent 识别的违约/赔偿比例为 {ratio:g}%，超过 50% 上限')
     if dim == 'penalty_no_amount' and facts.get('undertakes_indirect_loss') is True:
-        return (True, '强模型识别为承担间接损失')
-    return (True, '强模型语义研判命中；未抽取到可直接计算的数值事实')
+        return (True, 'Agent 识别为承担间接损失')
+    return (True, 'Agent 已识别出相关风险，但未提取到可直接计算的数值事实')
 
 def node_enforce(state):
-    """规则引擎只消费强模型输出的结构化事实，不对原始文本做关键词裁决。"""
+    """规则引擎只消费 Agent 输出的结构化事实，不对原始文本做关键词裁决。"""
     items = []; review_hints = []
     rules_by_id = state.get('rules_by_id', RULE_BY_ID)
     dim2rule = state.get('dim2rule', DIM2RULE)
@@ -394,7 +394,7 @@ def node_enforce(state):
                                  'rule_baseline': rules_by_id[rule_id]['baseline'], 'dim': dim,
                                  'evidence': evidence_map.get(dim, ''), 'suggestion': '请由信用审核专员核对原文、附件及审批记录后确认。',
                                  'severity': 'mid', 'level': '待人工确认',
-                                 'numeric_note': '强模型无法确认主体、条件、否定或审批例外',
+                                 'numeric_note': 'Agent 无法确认主体、适用条件、否定条款或审批例外',
                                  'facts': facts_by_dim.get(dim, {}), 'approval_required': rules_by_id[rule_id].get('approval_role', ''),
                                  'decision': 'needs_human_confirmation',
                                  'decision_source': 'strong_llm_uncertain'})
@@ -427,7 +427,7 @@ def node_enforce(state):
     dedup.sort(key=lambda x: (order.get(x['severity'], 9), x.get('page', 0), x['clause_id']))
     state['risks'] = dedup
     state['review_hints'] = review_hints
-    state['steps'].append(f'规则引擎Agent: 命中 {len(dedup)} 条风险(高{sum(1 for x in dedup if x["severity"]=="high")} 中{sum(1 for x in dedup if x["severity"]=="mid")}低{sum(1 for x in dedup if x["severity"]=="low")})；待人工确认 {len(review_hints)} 条')
+    state['steps'].append(f'规则检查：命中 {len(dedup)} 条风险（高{sum(1 for x in dedup if x["severity"]=="high")} 中{sum(1 for x in dedup if x["severity"]=="mid")} 低{sum(1 for x in dedup if x["severity"]=="low")}）；待人工确认 {len(review_hints)} 条')
     return state
 
 
@@ -443,7 +443,7 @@ def node_summary(state):
                         'n_needs_review': len(state.get('review_hints', [])),
                         'semantic_llm_attempts': state.get('semantic_llm_attempts', 0),
                         'semantic_llm_successes': state.get('semantic_llm_successes', 0)}
-    state['steps'].append(f'汇总结论Agent: 总体 {overall}')
+    state['steps'].append(f'汇总结论：总体 {overall}')
     return state
 
 def build_graph():

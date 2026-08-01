@@ -38,7 +38,7 @@ def _json_object(content: Any) -> dict[str, Any]:
         value = value[start:end + 1]
     data = json.loads(value)
     if not isinstance(data, dict):
-        raise ValueError('Agent 未返回 JSON 对象')
+        raise ValueError('Agent 审查服务未返回有效结果')
     return data
 
 
@@ -157,7 +157,7 @@ def plan_credit_audit(case: dict[str, Any], manifests: list[dict[str, Any]]) -> 
             if len(tasks) >= CREDIT_AUDIT_AGENT_MAX_TASKS:
                 break
         if not tasks:
-            raise ValueError('Agent 未规划有效任务')
+            raise ValueError('Agent 审查服务未生成有效的审核计划')
         covered = {field for task in tasks for field in task['target_facts']}
         essential = {'revenue', 'current_assets', 'current_liabilities', 'total_assets', 'total_liabilities', 'net_profit', 'operating_cashflow'}
         if not (covered & essential):

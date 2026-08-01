@@ -10,7 +10,7 @@ import { useAuth } from '../context/AuthContext'
 const { Text, Title } = Typography
 type Props = { onOpenCase: (id: string) => void; onOpenCredit: (id: string) => void }
 type ApprovalScope = 'all' | 'credit' | 'contract'
-const stageText: Record<string, string> = { pending_director: '待主管复核', pending_final: '待最终批核', approval: '待主管审批', final_approval: '待最终审批' }
+const stageText: Record<string, string> = { pending_director: '待主管复核', pending_final: '待最终审批', approval: '待主管审批', final_approval: '待最终审批' }
 
 export default function ApprovalCenterPage({ onOpenCase, onOpenCredit }: Props) {
   const { user } = useAuth()
@@ -26,19 +26,19 @@ export default function ApprovalCenterPage({ onOpenCase, onOpenCredit }: Props) 
   const open = (item: WorkboxItem) => item.source_type === 'credit' ? onOpenCredit(item.target_id) : onOpenCase(item.target_id)
   return <div className="approval-center-page role-page">
     <section className="page-hero page-hero-light">
-      <div><span className="section-kicker">DECISION CENTER</span><Title level={2}>审批中心</Title><Typography.Paragraph>只呈现当前需要你作出决定的信审与合同事项。先看建议结论、关键差异和未完成门禁，再进入详情批准、退回或上报。</Typography.Paragraph></div>
-      <div className="page-hero-actions"><Button onClick={load}>刷新决策队列</Button></div>
+      <div><span className="section-kicker">待我决定</span><Title level={2}>审批中心</Title><Typography.Paragraph>这里只显示需要你作出决定的信用审核、Agent 建议和合同事项。先看建议结论、关键差异和未完成的放行条件，再进入详情批准、退回或提交上级审批。</Typography.Paragraph></div>
+      <div className="page-hero-actions"><Button onClick={load}>刷新待决事项</Button></div>
     </section>
-    <section className="compact-metrics"><div className="compact-metric metric-attention"><span className="compact-metric-icon"><SafetyCertificateOutlined /></span><div><small>待决信审</small><strong>{creditCount}</strong><em>授信条件、路由与风险依据</em></div></div><div className="compact-metric metric-warning"><span className="compact-metric-icon"><FolderOpenOutlined /></span><div><small>待决合同</small><strong>{contractCount}</strong><em>合同放行与例外处理</em></div></div><div className="compact-metric"><span className="compact-metric-icon"><CheckCircleOutlined /></span><div><small>全部待决</small><strong>{approvalItems.length}</strong><em>请逐项明确决策结论</em></div></div></section>
-    <TaskContextBanner role={user?.role} title="先看差异，再查门禁，最后明确流转" description="本页面只呈现需要当前角色作出决定的信审和合同事项；审批意见会写入后续流程与审计记录。" nextAction={approvalItems.length ? '打开待决事项查看完整依据' : '查看客户工作台或合同案件中心'} />
+    <section className="compact-metrics"><div className="compact-metric metric-attention"><span className="compact-metric-icon"><SafetyCertificateOutlined /></span><div><small>待决定的信用审核</small><strong>{creditCount}</strong><em>信用条件、审批路径和风险依据</em></div></div><div className="compact-metric metric-warning"><span className="compact-metric-icon"><FolderOpenOutlined /></span><div><small>待决定的合同</small><strong>{contractCount}</strong><em>合同放行与例外处理</em></div></div><div className="compact-metric"><span className="compact-metric-icon"><CheckCircleOutlined /></span><div><small>待决定总数</small><strong>{approvalItems.length}</strong><em>请逐项明确处理意见</em></div></div></section>
+    <TaskContextBanner role={user?.role} title="先看差异，再查放行条件，最后确定下一步" description="这里只显示需要当前角色作出决定的信用审核、Agent 建议和合同事项；审批意见会写入后续流程和审计记录。" nextAction={approvalItems.length ? '打开待决事项查看完整依据' : '查看客户工作台或合同案件中心'} />
     <section className="approval-decision-guide" aria-label="审批决策路径">
-      <div><span className="approval-guide-number">01</span><div><Text strong>看差异</Text><Text type="secondary">申请条件、系统建议与前序意见是否一致。</Text></div></div>
-      <div><span className="approval-guide-number">02</span><div><Text strong>查门禁</Text><Text type="secondary">风险处置、补件和例外审批是否已闭环。</Text></div></div>
-      <div><span className="approval-guide-number">03</span><div><Text strong>定流转</Text><Text type="secondary">明确批准、退回或上报后由谁继续处理。</Text></div></div>
+      <div><span className="approval-guide-number">01</span><div><Text strong>看差异</Text><Text type="secondary">申请条件、Agent 建议与前序意见是否一致。</Text></div></div>
+      <div><span className="approval-guide-number">02</span><div><Text strong>查放行条件</Text><Text type="secondary">风险处理、补充材料和例外审批是否都已完成。</Text></div></div>
+      <div><span className="approval-guide-number">03</span><div><Text strong>定下一步</Text><Text type="secondary">明确批准、退回或提交上级审批后由谁继续处理。</Text></div></div>
     </section>
-    <Card className="approval-queue-card" title="待我决策" extra={<Segmented value={scope} onChange={value => setScope(value as ApprovalScope)} options={[{ value: 'all', label: `全部 (${approvalItems.length})` }, { value: 'credit', label: `信审 (${creditCount})` }, { value: 'contract', label: `合同 (${contractCount})` }]} />}>
-      <Alert showIcon type="info" style={{ marginBottom: 14 }} message="审批前请确认三件事" description="申请条件与建议条件的差异、尚未完成的风险/补件门禁、以及本次决策后将进入的下一审批或签约阶段。" />
-      {loading ? <div className="page-loading"><Spin /><Text type="secondary">正在整理待决事项…</Text></div> : visible.length ? <List className="approval-decision-list" dataSource={visible} renderItem={item => <List.Item actions={[<Button key="open" type="primary" icon={<ArrowRightOutlined />} iconPosition="end" onClick={() => open(item)}>查看并决策</Button>]}><List.Item.Meta avatar={<span className={`action-kind action-kind-${item.source_type}`}>{item.source_type === 'credit' ? <SafetyCertificateOutlined /> : <FolderOpenOutlined />}</span>} title={<Space wrap><Text strong>{item.customer_name}</Text><Tag color={item.source_type === 'credit' ? 'cyan' : 'blue'}>{item.source_type === 'credit' ? '客户信审' : '合同案件'}</Tag><Tag color="purple">{stageText[item.current_stage] || item.current_stage}</Tag></Space>} description={<div className="approval-card-copy"><Text strong>{item.title}</Text><Text>当前需要你决定：{item.action_hint || '批准、退回或上报后续审批。'}</Text><Text type="secondary">申请 / 处理摘要：{item.detail || '进入详情查看完整依据、差异和历史意见。'}</Text><Text type="secondary">提交时间或最近更新：{fmtTime(item.updated_at || item.created_at || 0)}</Text></div>} /></List.Item>} /> : <Empty description="当前没有等待你决策的信审或合同事项" />}
+    <Card className="approval-queue-card" title="待我决定" extra={<Segmented value={scope} onChange={value => setScope(value as ApprovalScope)} options={[{ value: 'all', label: `全部 (${approvalItems.length})` }, { value: 'credit', label: `信用审核 (${creditCount})` }, { value: 'contract', label: `合同 (${contractCount})` }]} />}>
+      <Alert showIcon type="info" style={{ marginBottom: 14 }} message="审批前请确认三件事" description="申请条件与建议条件的差异、尚未完成的风险或补充材料、以及本次决定后将进入的下一审批或签约阶段。" />
+      {loading ? <div className="page-loading"><Spin /><Text type="secondary">正在整理待决事项…</Text></div> : visible.length ? <List className="approval-decision-list" dataSource={visible} renderItem={item => <List.Item actions={[<Button key="open" type="primary" icon={<ArrowRightOutlined />} iconPosition="end" onClick={() => open(item)}>查看并决定</Button>]}><List.Item.Meta avatar={<span className={`action-kind action-kind-${item.source_type}`}>{item.source_type === 'credit' ? <SafetyCertificateOutlined /> : <FolderOpenOutlined />}</span>} title={<Space wrap><Text strong>{item.customer_name}</Text><Tag color={item.source_type === 'credit' ? 'cyan' : 'blue'}>{item.source_type === 'credit' ? '客户信用审核' : '合同案件'}</Tag><Tag color="purple">{stageText[item.current_stage] || item.current_stage}</Tag></Space>} description={<div className="approval-card-copy"><Text strong>{item.title}</Text><Text>当前需要你决定：{item.action_hint || '批准、退回或提交上级审批。'}</Text><Text type="secondary">申请 / 处理摘要：{item.detail || '进入详情查看完整依据、差异和历史意见。'}</Text><Text type="secondary">提交时间或最近更新：{fmtTime(item.updated_at || item.created_at || 0)}</Text></div>} /></List.Item>} /> : <Empty description="当前没有需要你决定的信用审核或合同事项" />}
     </Card>
   </div>
 }

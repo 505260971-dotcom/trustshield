@@ -44,7 +44,7 @@ def main():
         store.submit_credit_case(case['case_id'], reviewer)
         raise AssertionError('没有评估依据的草稿不得报送')
     except ValueError as exc:
-        assert 'Agent/模型建议' in str(exc)
+        assert 'Agent 建议' in str(exc)
 
     assessment = ready_assessment(case['case_id'], reviewer, conditions(1_000_000, 90))
     final_terms = conditions(800_000, 60)

@@ -47,9 +47,9 @@ def _assert_credit_access(case_id: str, user: dict) -> dict:
     """Business applicants may access only the credit cases they created."""
     item = store.get_credit_case(case_id)
     if not item:
-        raise HTTPException(404, '信审案件不存在')
+        raise HTTPException(404, '信用审核案件不存在')
     if user.get('role') == 'business' and item.get('created_by') != user.get('id'):
-        raise HTTPException(403, '无权访问该信审案件')
+        raise HTTPException(403, '无权访问该信用审核案件')
     return item
 
 
@@ -215,7 +215,7 @@ async def credit_route_draft_create(user=Depends(require('admin:cases'))):
 async def credit_route_version_get(version: str, user=Depends(require('admin:cases'))):
     result = store.get_credit_route_version(version)
     if not result.get('version'):
-        raise HTTPException(404, '信审批核路由版本不存在')
+        raise HTTPException(404, '信用审核审批路径版本不存在')
     return result
 
 
@@ -336,7 +336,7 @@ async def credit_document_preview(case_id: str, document_id: str, user=Depends(r
     _assert_credit_access(case_id, user)
     item = store.get_credit_document(case_id, document_id)
     if not item:
-        raise HTTPException(404, '信审材料不存在')
+        raise HTTPException(404, '信用审核材料不存在')
     asset = store.get_credit_document_text_asset(document_id, item.get('content_hash') or '')
     records = (asset or {}).get('records') or []
     status = (asset or {}).get('status') or item.get('text_status') or 'pending'
@@ -367,10 +367,10 @@ async def credit_document_upload(case_id: str, file: UploadFile=File(...), docum
     _assert_credit_access(case_id, user)
     ext = os.path.splitext(file.filename or '')[1].lower()
     if ext not in ALLOWED_ATTACHMENT:
-        raise HTTPException(400, '信审材料仅支持 DOCX/PDF/XLSX/TXT/PNG/JPG')
+        raise HTTPException(400, '信用审核材料仅支持 DOCX、PDF、XLSX、TXT、PNG、JPG 格式')
     safe_name = os.path.basename(file.filename or 'credit-document')
     if not safe_name or len(safe_name) > 255:
-        raise HTTPException(400, '信审材料文件名无效')
+        raise HTTPException(400, '信用审核材料文件名无效')
     folder = os.path.join(UPLOAD_DIR, 'credit-materials', case_id)
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f'{uuid.uuid4().hex}_{safe_name}')
@@ -403,7 +403,7 @@ async def credit_document_download(case_id: str, document_id: str, user=Depends(
     _assert_credit_access(case_id, user)
     item = store.get_credit_document(case_id, document_id)
     if not item or not os.path.isfile(item.get('stored_path') or ''):
-        raise HTTPException(404, '信审材料不存在')
+        raise HTTPException(404, '信用审核材料不存在')
     store.audit(user, 'credit.document_download', 'credit_document', document_id, {'case_id': case_id})
     return FileResponse(item['stored_path'], filename=item['original_name'])
 
@@ -431,8 +431,8 @@ def _run_credit_assessment(assessment_id: str):
         # ``run_credit_assessment`` can legitimately spend longer than one UI
         # polling window in its first remote ReAct turn.  Publish an immediate
         # heartbeat so an empty step list is never mistaken for a dead worker.
-        _publish_credit_step(assessment_id, '任务已启动：正在载入信审材料与 CRM/ERP 敞口快照')
-        _publish_credit_step(assessment_id, '正在执行生产 ReAct Agent；单轮模型调用最长可能等待 45 秒')
+        _publish_credit_step(assessment_id, '任务已启动：正在载入信用审核材料与 CRM/ERP 额度占用数据')
+        _publish_credit_step(assessment_id, '正在执行信用审核 Agent；单轮模型调用最长可能等待 45 秒')
         from .graph.credit_graph import run_credit_assessment
         case = store.get_credit_case(job['case_id'])
         documents = [store.get_credit_document(job['case_id'], item['document_id']) for item in store.list_credit_documents(job['case_id'])]
@@ -446,7 +446,7 @@ def _run_credit_assessment(assessment_id: str):
         completed = store.finish_credit_assessment(assessment_id, report, evidence)
         with CREDIT_JOB_LOCK:
             job.update(status='done', result=completed)
-        _publish_credit_event(assessment_id, {'type': 'completed', 'message': '信审 Agent 已完成，正在固化评估快照'})
+            _publish_credit_event(assessment_id, {'type': 'completed', 'message': '信用审核 Agent 已完成，正在保存评估记录'})
     except Exception as exc:
         try:
             store.finish_credit_assessment(assessment_id, None, [], str(exc))
@@ -470,7 +470,7 @@ async def credit_assessment_start(case_id: str, body: dict | None=None, user=Dep
         CREDIT_JOBS[assessment['assessment_id']] = {
             'status': 'running', 'case_id': case_id, 'model_version': assessment['model_version'],
             'steps': [], 'events': [], 'live_evidence': [], 'live_claims': [],
-            'active': {'type': 'starting', 'message': '正在准备信审材料'},
+            'active': {'type': 'starting', 'message': '正在准备信用审核材料'},
             'event_seq': 0, 'result': None, 'error': '', 'started_at': time.time(),
         }
     threading.Thread(target=_run_credit_assessment, args=(assessment['assessment_id'],), daemon=True).start()
@@ -501,7 +501,7 @@ async def credit_runtime_readiness(user=Depends(require('credit:manage'))):
             'data_transfer_authorized': RERANK_ALLOW_REMOTE_FINANCIAL_DATA,
             'model': RERANK_MODEL,
             'message': ('已就绪' if rerank_ready else
-                        '未启用或未配置 DashScope qwen3-rerank；生产 ReAct 检索会安全失败，不会降级为本地词法排序'),
+                        '未启用或未配置 DashScope qwen3-rerank；正式依据检索会安全失败，不会降级为本地词法排序'),
         },
         'embedding': {
             'ready': embedding_ready,
@@ -526,7 +526,7 @@ async def credit_assessment_get(case_id: str, assessment_id: str, user=Depends(r
     _assert_credit_access(case_id, user)
     result = store.get_credit_assessment(assessment_id)
     if not result or result.get('case_id') != case_id:
-        raise HTTPException(404, '信审评估不存在')
+        raise HTTPException(404, '信用审核评估不存在')
     return result
 
 
@@ -539,7 +539,7 @@ async def credit_assessment_status(case_id: str, assessment_id: str, user=Depend
             return {key: value for key, value in job.items() if key != 'result'}
     result = store.get_credit_assessment(assessment_id)
     if not result or result.get('case_id') != case_id:
-        raise HTTPException(404, '信审评估不存在')
+        raise HTTPException(404, '信用审核评估不存在')
     runtime = (result.get('report') or {}).get('audit_runtime') or {}
     return {
         'status': result['status'],
@@ -548,7 +548,7 @@ async def credit_assessment_status(case_id: str, assessment_id: str, user=Depend
         'trace': runtime.get('trace') or [],
         'live_evidence': runtime.get('evidence_sources') or [],
         'live_claims': runtime.get('claims') or [],
-        'active': {'type': result['status'], 'message': '已载入最近一次信审运行结果'},
+        'active': {'type': result['status'], 'message': '已载入最近一次信用审核结果'},
         'error': result.get('error', ''),
     }
 
@@ -558,10 +558,10 @@ async def credit_assessment_apply(case_id: str, assessment_id: str, user=Depends
     current = _assert_credit_access(case_id, user)
     assessment = store.get_credit_assessment(assessment_id)
     if not assessment or assessment.get('case_id') != case_id or assessment.get('status') != 'done':
-        raise HTTPException(409, '尚无可应用的已完成信审评估')
+        raise HTTPException(409, '尚无可应用的已完成信用审核评估')
     result = assessment.get('report') or {}
     if result.get('runtime_mode') != 'production':
-        raise HTTPException(409, '该信审结果不是生产 ReAct 审计快照，不能应用、审批或绑定合同')
+        raise HTTPException(409, '该信用审核结果不是可用的正式 Agent 评估记录，不能应用、审批或绑定合同')
     analysis = result.get('assessment') or {}
     if analysis.get('model_status') != 'ready_for_reviewer' or any(item.get('level') == 'high' for item in analysis.get('risk_flags') or []):
         raise HTTPException(409, '评估存在材料缺失或高风险阻断，不能直接应用建议条件')
@@ -648,7 +648,7 @@ async def case_center_create(body: dict, user=Depends(require('review:create')))
         if credit_case_id:
             credit = store.require_active_credit_case(credit_case_id)
             if credit.get('customer_name') != str(body.get('customer_name') or '').strip():
-                raise ValueError('信审版本客户与合同案件客户不一致')
+                raise ValueError('信用审核版本客户与合同案件客户不一致')
         result = store.create_case_center(str(body.get('customer_name') or ''), str(body.get('business_type') or '一般'),
                                           str(body.get('request_note') or ''), user, credit_case_id,
                                           str(body.get('priority') or 'normal'), body.get('due_at'))
@@ -707,7 +707,7 @@ def _assert_case_access(job_id: str, user: dict):
 def _run(path: str, job_id: str, created_at: float):
     job=JOBS[job_id]
     try:
-        _publish_review_step(job_id, '任务已启动：正在读取合同文件与已绑定信审边界')
+        _publish_review_step(job_id, '任务已启动：正在读取合同文件与已绑定信用审核条件')
         from .graph.review_graph import run_review
         report=run_review(
             path, on_step=lambda step: _publish_review_step(job_id, step),
@@ -734,18 +734,18 @@ def _run(path: str, job_id: str, created_at: float):
             summary['high'] = sum(1 for item in report['risks'] if item.get('severity') == 'high')
             summary['mid'] = sum(1 for item in report['risks'] if item.get('severity') == 'mid')
             summary['low'] = sum(1 for item in report['risks'] if item.get('severity') == 'low')
-            summary['overall_level'] = '信审阻断·须先更新信审条件'
-            step = f'信审前置校验: 绑定 {credit_case["customer_name"]} / V{credit_case["version"]}，发现 {len(credit_risks)} 项越界'
+            summary['overall_level'] = '信用审核条件不符·须先更新条件'
+            step = f'信用审核前置检查：绑定 {credit_case["customer_name"]} / V{credit_case["version"]}，发现 {len(credit_risks)} 项不符合条件的问题'
             report['steps'].append(step); _publish_review_step(job_id, step)
         else:
-            step = f'信审前置校验: 绑定 {credit_case["customer_name"]} / V{credit_case["version"]}，合同未突破已生效条件'
+            step = f'信用审核前置检查：绑定 {credit_case["customer_name"]} / V{credit_case["version"]}，合同未超出已生效条件'
             report['steps'].append(step); _publish_review_step(job_id, step)
         report['_created_at']=created_at; report['_path']=path; report['filename']=job.get('filename') or report.get('filename','')
         mapping=report.pop('_mask_mapping',{})
         store.save_review(job_id,report,status='done',actor=job['actor'],mapping=mapping,rule_version=job['rule_version'],rules_by_id=job['rules_by_id'])
         with REVIEW_JOB_LOCK:
             job['result']=_safe_result(report); job['status']='done'
-        _publish_review_event(job_id, {'type': 'completed', 'message': '合同审查已完成，正在固化风险与门禁结果'})
+        _publish_review_event(job_id, {'type': 'completed', 'message': '合同审查已完成，正在保存风险与放行条件检查结果'})
         store.audit(job['actor'],'review.complete','review',job_id,{'risks':report.get('summary',{}).get('n_risks',0)})
     except Exception as e:
         with REVIEW_JOB_LOCK:
@@ -782,7 +782,7 @@ async def case_document_review(case_id: str, file: UploadFile=File(...), busines
     try:
         if bound_credit_id:
             if requested_credit_id and requested_credit_id != bound_credit_id:
-                raise ValueError('上传请求的信审版本与合同案件已绑定版本不一致')
+                raise ValueError('上传请求的信用审核版本与合同案件已绑定版本不一致')
             credit_case = store.require_active_credit_case(bound_credit_id)
         else:
             # This also safely repairs a case created before the browser had
@@ -1028,7 +1028,7 @@ async def export_docx_route(job_id: str, mode: str='revised', lang: str='', user
             raise HTTPException(409, str(e))
         credit_blockers = [x for x in store.list_findings(job_id) if str(x.get('rule_id') or '').startswith('CREDIT_')]
         if credit_blockers:
-            raise HTTPException(409, '合同存在信审越界项，必须先更新信审并基于新版本重新复审，不能在合同端放行')
+            raise HTTPException(409, '合同存在不符合信用审核条件的问题，必须先更新信用审核并基于新版本重新复审，不能直接放行')
         pending = [x for x in store.list_approvals(job_id) if x['status'] != 'approved']
         if pending:
             raise HTTPException(409, '存在未完成或未通过的主管/集团财务总监审批，不能导出可签约修订稿')
@@ -1067,7 +1067,7 @@ async def translate_route(job_id: str,body: dict,user=Depends(require('review:re
         cached = store.get_translation(job_id, target_lang)
         if cached and cached.get('status') == 'done' and cached.get('result'):
             tfid=uuid.uuid4().hex[:12]
-            TJOBS[tfid]={'status':'done','steps':['翻译Agent: 命中已持久化结果'],'result':cached['result']}
+            TJOBS[tfid]={'status':'done','steps':['翻译任务：已使用已保存结果'],'result':cached['result']}
             store.audit(user,'review.translate_cache','review',job_id,{'target_lang':target_lang})
             return {'tfid':tfid,'cached':True}
     tfid=uuid.uuid4().hex[:12]
@@ -1199,7 +1199,7 @@ async def oa_flow_batch_update(flow_id: str, body: dict, user=Depends(require('r
 
 @app.post('/api/integrations/crm/credit-hooks')
 async def crm_credit_hook_create(body: dict, user=Depends(require('credit:create'))):
-    """CRM 预留端口：接收客户主数据并可选创建信审草稿（不执行授信测算）。"""
+    """CRM 接入端口：接收客户主数据并可选创建信用审核草稿（不执行授信测算）。"""
     customer_name = str(body.get('customer_name') or '').strip()
     if not customer_name:
         raise HTTPException(400, 'customer_name 必填')
@@ -1219,7 +1219,7 @@ async def crm_credit_hook_create(body: dict, user=Depends(require('credit:create
             raise HTTPException(400, str(e))
     store.audit(user,'crm.credit_hook','crm',hook['hook_id'],{'customer':customer_name,'credit_case_id':(credit_case or {}).get('case_id')})
     return {'hook': hook, 'credit_case': credit_case, 'mock': True,
-            'integration_note': '此端口供 CRM 推送信用申请占位；额度/账期测算由信审 Agent 后续填充并走审批生效'}
+            'integration_note': '此端口供 CRM 推送信用申请；额度和账期由后续 Agent 评估生成，再进入审批流程。'}
 
 @app.get('/api/integrations/crm/credit-hooks')
 async def crm_credit_hook_list(limit: int=50, user=Depends(require('credit:read'))):

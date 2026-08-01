@@ -52,7 +52,7 @@ function parseRoute(): Route {
 }
 
 const routeTitle: Record<Page, string> = {
-  home: '待我处理', customers: '客户工作台', customer: '客户档案', credits: '信审管理', credit: '客户信审',
+  home: '待我处理', customers: '客户工作台', customer: '客户档案', credits: '信用审核管理', credit: '客户信用审核',
   contracts: '合同审查', case: '合同案件', new: '发起合同审查', records: '我的记录', approvals: '审批中心',
   matrix: '风险矩阵', knowledge: '条款知识库',
   admin: '组织与规则', settings: '系统与集成',
@@ -103,7 +103,7 @@ function AppInner() {
     ]
     if (role === 'business') base.push({ key: 'records', icon: <UnorderedListOutlined />, label: '我的申请' })
     if (role === 'reviewer') base.push(
-      { key: 'credits', icon: <SafetyCertificateOutlined />, label: '信审管理' },
+      { key: 'credits', icon: <SafetyCertificateOutlined />, label: '信用审核管理' },
       { key: 'contracts', icon: <FolderOpenOutlined />, label: '合同审查' },
       { key: 'matrix', icon: <BarChartOutlined />, label: '风险矩阵' },
       { key: 'knowledge', icon: <BookOutlined />, label: '条款知识库' },
@@ -137,10 +137,10 @@ function AppInner() {
 
   const createMenu: MenuProps['items'] = role === 'business'
     ? [
-        { key: 'credit', icon: <SafetyCertificateOutlined />, label: '发起客户信审' },
+      { key: 'credit', icon: <SafetyCertificateOutlined />, label: '发起客户信用审核' },
         { key: 'contract', icon: <FileAddOutlined />, label: '发起合同审查' },
       ]
-    : [{ key: 'credit', icon: <SafetyCertificateOutlined />, label: '新建信审版本' }]
+    : [{ key: 'credit', icon: <SafetyCertificateOutlined />, label: '新建信用审核版本' }]
 
   let page: ReactNode
   if (activeRoute.page === 'home') {
@@ -176,7 +176,7 @@ function AppInner() {
   return <Layout className="app-shell" style={{ minHeight: '100vh' }}>
     <Sider collapsible breakpoint="lg" collapsedWidth="0" theme="dark" width={236}>
       <div className="brand"><SafetyCertificateOutlined /><span>ContractGuard</span></div>
-      {canCreateCredit && <div className="sider-create"><Dropdown menu={{ items: createMenu, onClick: ({ key }) => key === 'contract' ? createContractFor() : createCreditFor() }} trigger={['click']}><Button type="primary" block icon={<FileAddOutlined />}>{role === 'business' ? '新建业务申请' : '新建信审版本'}</Button></Dropdown></div>}
+      {canCreateCredit && <div className="sider-create"><Dropdown menu={{ items: createMenu, onClick: ({ key }) => key === 'contract' ? createContractFor() : createCreditFor() }} trigger={['click']}><Button type="primary" block icon={<FileAddOutlined />}>{role === 'business' ? '发起业务申请' : '新建信用审核版本'}</Button></Dropdown></div>}
       <Menu theme="dark" mode="inline" selectedKeys={[activeMenuFor(activeRoute.page)]} items={menu} onSelect={event => go(`/${event.key}`)} />
       <div className="sider-foot"><Text>合同协同与风险控制</Text></div>
     </Sider>
@@ -186,21 +186,21 @@ function AppInner() {
         <Space wrap>
           <Tag color="blue">{approvalRoleLabel(role)}</Tag>
           <Text className="header-user">{user.display_name}</Text>
-          <Badge className="header-health" status={health?.llm ? 'success' : 'warning'} text={health?.llm ? '模型在线' : '模型未配置'} />
+          <Badge className="header-health" status={health?.llm ? 'success' : 'warning'} text={health?.llm ? 'Agent 审查服务正常' : 'Agent 审查服务未配置'} />
           <Button size="small" icon={<SearchOutlined />} onClick={() => setCustomerSearchOpen(true)}>搜索</Button>
-          <Button size="small" icon={<ReloadOutlined />} onClick={ping}>检测</Button>
-          {role === 'reviewer' && <Button size="small" icon={<BookOutlined />} onClick={() => setRulesOpen(true)}>规则库</Button>}
+          <Button size="small" icon={<ReloadOutlined />} onClick={ping}>检查服务</Button>
+          {role === 'reviewer' && <Button size="small" icon={<BookOutlined />} onClick={() => setRulesOpen(true)}>合同规则</Button>}
           <Button size="small" onClick={logout}>退出</Button>
         </Space>
       </Header>
       <Content className="workspace-content"><Suspense fallback={<div className="page-loading"><Spin /><Text type="secondary">正在加载工作区…</Text></div>}>{page}</Suspense></Content>
     </Layout>
-    <Drawer title="合同规则库" open={rulesOpen} onClose={() => setRulesOpen(false)} width={620}>
-      <List dataSource={rules} renderItem={rule => <List.Item><List.Item.Meta avatar={<Tag color={rule.severity === 'high' ? 'red' : 'orange'}>{rule.id}</Tag>} title={<Text strong>{rule.baseline}</Text>} description={<><Text type="secondary">适用：{rule.applies_to?.join('、') || '全部'}　{rule.approval_role ? `例外审批：${approvalRoleLabel(rule.approval_role)}` : '无需例外审批'}</Text><br /><Text type="secondary">判定：{rule.check}</Text></>} /></List.Item>} />
+    <Drawer title="合同规则" open={rulesOpen} onClose={() => setRulesOpen(false)} width={620}>
+      <List dataSource={rules} renderItem={rule => <List.Item><List.Item.Meta avatar={<Tag color={rule.severity === 'high' ? 'red' : 'orange'}>{rule.id}</Tag>} title={<Text strong>{rule.baseline}</Text>} description={<><Text type="secondary">适用业务：{rule.applies_to?.join('、') || '全部'}　{rule.approval_role ? `例外审批：${approvalRoleLabel(rule.approval_role)}` : '无需例外审批'}</Text><br /><Text type="secondary">规则判定：{rule.check}</Text></>} /></List.Item>} />
     </Drawer>
-    <Modal title="快速定位客户业务" open={customerSearchOpen} onCancel={() => { setCustomerSearchOpen(false); setCustomerSearch('') }} footer={null} destroyOnClose>
-      <AutoComplete style={{ width: '100%' }} value={customerSearch} options={customerOptions.map(customer => ({ value: customer.customer_name, label: <div className="customer-search-option"><b>{customer.customer_name}</b><span>{customer.latest_credit?.status === 'approved' ? `有效信审 V${customer.latest_credit.version}` : '暂无有效信审'} · 合同 ${customer.contracts.length} 份</span></div> }))} onChange={setCustomerSearch} filterOption={(input, option) => String(option?.value || '').toLowerCase().includes(input.toLowerCase())} onSelect={(_, option) => { const customer = customerOptions.find(item => item.customer_name === option.value); if (customer) { openCustomer(customer.customer_key); setCustomerSearchOpen(false); setCustomerSearch('') } }} placeholder="搜索客户名称" />
-      {!customerOptions.length && <div className="page-loading"><Spin size="small" /><Text type="secondary">正在加载客户索引…</Text></div>}
+    <Modal title="查找客户" open={customerSearchOpen} onCancel={() => { setCustomerSearchOpen(false); setCustomerSearch('') }} footer={null} destroyOnClose>
+      <AutoComplete style={{ width: '100%' }} value={customerSearch} options={customerOptions.map(customer => ({ value: customer.customer_name, label: <div className="customer-search-option"><b>{customer.customer_name}</b><span>{customer.latest_credit?.status === 'approved' ? `有效信用审核 V${customer.latest_credit.version}` : '暂无有效信用审核'} · 合同 ${customer.contracts.length} 份</span></div> }))} onChange={setCustomerSearch} filterOption={(input, option) => String(option?.value || '').toLowerCase().includes(input.toLowerCase())} onSelect={(_, option) => { const customer = customerOptions.find(item => item.customer_name === option.value); if (customer) { openCustomer(customer.customer_key); setCustomerSearchOpen(false); setCustomerSearch('') } }} placeholder="搜索客户名称" />
+      {!customerOptions.length && <div className="page-loading"><Spin size="small" /><Text type="secondary">正在加载客户列表…</Text></div>}
     </Modal>
   </Layout>
 }

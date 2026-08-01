@@ -63,7 +63,7 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
   const upload = async (item: MaterialRequest, file: File) => {
     if (!jobId) return false
     setBusy(true)
-    try { await api.uploadMaterial(jobId, item.request_id, file); message.success('附件已关联到待补材料'); load() }
+    try { await api.uploadMaterial(jobId, item.request_id, file); message.success('附件已添加到补充材料事项'); load() }
     catch (error: any) { message.error(error?.message || '附件上传失败') }
     finally { setBusy(false) }
     return false
@@ -100,7 +100,7 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
       }))
       const result = await api.oaBatchUpdate(oaFlowId, accepted)
       setOaFlow(await api.oaGetFlow(oaFlowId))
-      message.success(result.export_hint || '已批量挂载采纳建议')
+      message.success(result.export_hint || '已批量写入确认后的建议')
     } catch (e: any) { message.error(e?.message || '批量更新失败') }
     finally { setBusy(false) }
   }
@@ -120,12 +120,12 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
   const showWorkflow = approvals.length > 0 || materials.length > 0
 
   return <>
-    {showWorkflow && <Card title="审批与待补材料" style={{ marginTop: 16 }}>
+    {showWorkflow && <Card title="审批与补充材料" style={{ marginTop: 16 }}>
       {approvals.length > 0 && <>
         <Alert type={approvals.some(x => x.status === 'pending') ? 'warning' : 'success'} showIcon
-          message={approvals.some(x => x.status === 'pending') ? '存在待审批的合同例外，未完成前不可导出可签约修订稿。' : '所有必需的合同例外审批均已有决定。'} />
-        <List size="small" style={{ marginTop: 12 }} dataSource={approvals} renderItem={item => <List.Item actions={canDecide(item) && item.status === 'pending' ? [<Button size="small" icon={<SendOutlined />} onClick={() => { setSelectedApproval(item); setNote('') }}>处理审批</Button>] : []}>
-          <List.Item.Meta title={<Space><Tag color={item.status === 'approved' ? 'green' : item.status === 'pending' ? 'orange' : 'red'}>{item.status}</Tag><Text strong>需{approvalRoleLabel(item.required_role)}审批</Text></Space>}
+          message={approvals.some(x => x.status === 'pending') ? '存在待审批的合同例外，完成前不能导出可签约修订稿。' : '所有必需的合同例外审批均已有决定。'} />
+          <List size="small" style={{ marginTop: 12 }} dataSource={approvals} renderItem={item => <List.Item actions={canDecide(item) && item.status === 'pending' ? [<Button size="small" icon={<SendOutlined />} onClick={() => { setSelectedApproval(item); setNote('') }}>处理审批</Button>] : []}>
+          <List.Item.Meta title={<Space><Tag color={item.status === 'approved' ? 'green' : item.status === 'pending' ? 'orange' : 'red'}>{item.status === 'approved' ? '已批准' : item.status === 'pending' ? '待审批' : item.status === 'changes_requested' ? '需修改' : '已驳回'}</Tag><Text strong>需{approvalRoleLabel(item.required_role)}审批</Text></Space>}
             description={item.decision_note || `创建于 ${fmtTime(item.created_at)}`} />
         </List.Item>} />
       </>}
@@ -134,13 +134,13 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
       </List.Item>} />}
     </Card>}
 
-    <Card title="交付与高级功能" style={{ marginTop: 16 }} extra={<Button size="small" onClick={()=>setShowAdvanced(value=>!value)}>{showAdvanced?'收起高级功能':'展开高级功能'}</Button>}>
-      <Alert type="info" showIcon message="日常处理只需完成当前门禁" description="附件预览、OA 演示集成和原始交付操作已收纳在这里，不影响风险处置、补件和审批主流程。" />
+      <Card title="附件与集成" style={{ marginTop: 16 }} extra={<Button size="small" onClick={()=>setShowAdvanced(value=>!value)}>{showAdvanced?'收起详细功能':'展开详细功能'}</Button>}>
+      <Alert type="info" showIcon message="日常处理只需完成当前放行条件" description="附件预览、OA 演示集成和文件交付操作已收纳在这里，不影响风险处理、补充材料和审批主流程。" />
       {showAdvanced&&<><Card type="inner" title="案件附件（在线切换查阅）" style={{ marginTop: 14 }}
       extra={<Upload showUploadList={false} beforeUpload={(f)=>uploadAnnex(f as File)} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg">
         <Button size="small" icon={<PaperClipOutlined/>} loading={busy}>上传附件</Button>
       </Upload>}>
-      <Alert type="info" showIcon style={{marginBottom:12}} message="主合同走审查链路；附件仅做同案存档与条款预览，可在演示中切换查阅。" />
+      <Alert type="info" showIcon style={{marginBottom:12}} message="主合同会进入审查流程；附件仅用于同案存档和条款预览，可在演示中切换查看。" />
       {attachments.length ? <List size="small" dataSource={attachments}
         renderItem={item => <List.Item actions={[
           <Button key="v" size="small" type="link" onClick={()=>setActiveAtt(item)}>预览</Button>,
@@ -156,17 +156,17 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
       </Card>}
       </Card>
 
-    <Card type="inner" title="泛微 OA 集成（演示 Mock）" style={{ marginTop: 14 }}
+    <Card type="inner" title="泛微 OA 集成（演示）" style={{ marginTop: 14 }}
       extra={<Button type="primary" icon={<CloudUploadOutlined/>} loading={busy} onClick={pushOa} disabled={!jobId}>推送到 OA</Button>}>
       <Alert type="info" showIcon style={{marginBottom:12}}
-        message="黑客松 Mock：创建流程 → 角色决策 → 批量挂载已采纳建议。生产替换为泛微流程 API。" />
+        message="演示模式：创建流程 → 提交角色决定 → 批量写入已确认建议。正式环境可替换为泛微流程接口。" />
       {oaFlowId && <Space direction="vertical" style={{width:'100%'}}>
         <Text>流程号：<Text code>{oaFlowId}</Text> · 状态 <Tag color="blue">{oaFlow?.status||'—'}</Tag></Text>
         <Space wrap>
           <Select value={oaRole} style={{width:220}} onChange={setOaRole} options={['信用审核专员','财务审批主管','集团财务总监 / 最终审批人'].map(x=>({value:x,label:x}))}/>
           <Select value={oaDecision} style={{width:120}} onChange={setOaDecision} options={['采纳','驳回','要求修改'].map(x=>({value:x,label:x}))}/>
           <Input style={{width:220}} placeholder="决策意见" value={oaNote} onChange={e=>setOaNote(e.target.value)}/>
-          <Button loading={busy} onClick={submitOaDecision}>提交角色决策</Button>
+          <Button loading={busy} onClick={submitOaDecision}>提交审批决定</Button>
           <Button loading={busy} onClick={batchUpdateOa}>批量更新原文建议</Button>
         </Space>
         {oaFlow?.role_decisions && Object.keys(oaFlow.role_decisions).length>0 &&

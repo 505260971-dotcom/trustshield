@@ -18,7 +18,7 @@ class OAAdapter:
         self._flows = {}  # flow_id -> state
 
     def create_review_flow(self, contract_meta, report_summary, job_id='', findings=None):
-        """在 OA 创建合同评审流程,挂载 Agent 风险清单。"""
+        """在 OA 创建合同评审流程，挂载 Agent 风险清单。"""
         flow_id = 'OA-' + str(int(time.time()))[-7:] + uuid.uuid4().hex[:4].upper()
         summary = report_summary or {}
         risks = findings or []
@@ -43,7 +43,7 @@ class OAAdapter:
             'updated_at': time.time(),
             'mock': True,
             'integration': 'weaver_oa',
-            'note': '演示用 Mock 流程；生产替换为泛微流程创建 API',
+            'note': '演示流程；正式环境可替换为泛微流程创建接口',
         }
         return {'flow_id': flow_id, 'mock': True, 'status': 'draft', 'job_id': job_id}
 
@@ -98,7 +98,7 @@ ROLE_FOCUS = {
 class CRMAdapter:
     """CRM 预留端口：接收客户主数据/信用申请占位，不执行授信测算。
 
-    真正的东江信评模型由信审同学实现；本适配器只保证「端口形状」可演示、可对接。
+    真正的东江信用评估模型由信用审核流程实现；本适配器只保证接口可以演示和对接。
     """
 
     def __init__(self):
@@ -114,12 +114,12 @@ class CRMAdapter:
             'status': 'received',
             'customer_name': str(payload.get('customer_name') or '').strip(),
             'crm_account_id': str(payload.get('crm_account_id') or ''),
-            'request_note': str(payload.get('request_note') or 'CRM 推送的信用申请占位'),
+            'request_note': str(payload.get('request_note') or 'CRM 推送的信用申请'),
             'conditions_hint': payload.get('conditions') or {},
             'credit_case_id': None,
             'created_at': now,
             'updated_at': now,
-            'note': '已接收 CRM 请求；可创建信审草稿供人工/信审 Agent 测算后审批生效',
+            'note': '已接收 CRM 请求；可创建信用审核草稿，完成 Agent 评估和人工审批后生效',
         }
         self._hooks[hook_id] = record
         return dict(record)

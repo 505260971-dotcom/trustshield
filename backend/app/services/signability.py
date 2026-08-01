@@ -92,8 +92,8 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
     if not decision:
         items.append(_item(
             item_id='credit-binding', category='credit', rule_id='CREDIT_BINDING',
-            title='已生效信审边界', current='未绑定', target='选择客户已生效信审版本',
-            action='先完成客户信审并绑定已生效版本，再继续合同复审。',
+            title='已生效信用审核条件', current='未绑定', target='选择客户已生效信用审核版本',
+            action='先完成客户信用审核并绑定已生效版本，再继续合同复审。',
             can_resolve_in_contract=False, requires_credit_reapproval=True,
         ))
     else:
@@ -117,14 +117,14 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
         if amount_risk or (credit_limit is not None and total_exposure is not None and total_exposure > credit_limit):
             if available_for_contract is not None and available_for_contract >= 0:
                 target = f'合同金额 ≤ {_money(available_for_contract, currency)}'
-                action = f'将合同金额调整至不高于 {_money(available_for_contract, currency)}，使合同后总敞口回到信审上限内。'
+                action = f'将合同金额调整至不高于 {_money(available_for_contract, currency)}，使合同计入后总额度占用不超过信用审核上限。'
                 requires_reapproval = False
             else:
-                target = '先提高客户信审额度或降低既有敞口'
-                action = '当前既有敞口已经占满或超过信审额度，单独修改合同金额无法解决，必须先更新客户信审或处理既有敞口。'
+                target = '先提高客户信用额度或降低已有额度占用'
+                action = '当前已有额度占用已经达到或超过信用额度上限，单独修改合同金额无法解决，必须先更新客户信用审核条件或减少已有额度占用。'
                 requires_reapproval = True
             items.append(_item(
-                item_id='credit-exposure', category='credit', rule_id='CREDIT_EXPOSURE', title='客户总敞口',
+                item_id='credit-exposure', category='credit', rule_id='CREDIT_EXPOSURE', title='客户额度占用合计',
                 current=f'合同 {_money(contract_amount, currency)} · 合计 {_money(total_exposure, currency)}',
                 target=target, action=action, can_resolve_in_contract=not requires_reapproval,
                 requires_credit_reapproval=requires_reapproval, clause_id=amount_risk.get('clause_id', ''),
@@ -138,8 +138,8 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
             items.append(_item(
                 item_id='credit-term', category='credit', rule_id='CREDIT_TERM', title='最长账期',
                 current=f'{term_days:g} 天' if term_days is not None else '未识别账期',
-                target=f'≤ {max_days:g} 天' if max_days is not None else '补充已生效信审账期',
-                action=f'将合同最长账期调整为不超过 {max_days:g} 天。' if max_days is not None else '先确认已生效信审的最长账期。',
+                target=f'≤ {max_days:g} 天' if max_days is not None else '补充已生效信用审核账期',
+                action=f'将合同最长账期调整为不超过 {max_days:g} 天。' if max_days is not None else '先确认已生效信用审核条件中的最长账期。',
                 can_resolve_in_contract=max_days is not None, requires_credit_reapproval=max_days is None,
                 clause_id=term_risk.get('clause_id', ''), source_ref=term_risk.get('source_ref', ''),
             ))
@@ -151,20 +151,20 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
             items.append(_item(
                 item_id='credit-prepayment', category='credit', rule_id='CREDIT_PREPAYMENT', title='交付前收款',
                 current=f'{prepay:g}%' if prepay is not None else '未识别比例',
-                target=f'≥ {min_prepay:g}%' if min_prepay is not None else '补充已生效信审收款比例',
-                action=f'将交付前收款提高至至少 {min_prepay:g}%。' if min_prepay is not None else '先确认已生效信审的最低收款比例。',
+                target=f'≥ {min_prepay:g}%' if min_prepay is not None else '补充已生效信用审核收款比例',
+                action=f'将交付前收款提高至至少 {min_prepay:g}%。' if min_prepay is not None else '先确认已生效信用审核条件中的最低收款比例。',
                 can_resolve_in_contract=min_prepay is not None, requires_credit_reapproval=min_prepay is None,
                 clause_id=prepay_risk.get('clause_id', ''), source_ref=prepay_risk.get('source_ref', ''),
             ))
 
         if payment_risk:
             allowed = conditions.get('allowed_payment_methods') or []
-            allowed_label = '、'.join(_method(item) for item in allowed) or '信审未提供允许方式'
+            allowed_label = '、'.join(_method(item) for item in allowed) or '信用审核未提供允许方式'
             current = _method((payment_risk.get('facts') or {}).get('payment_method') or 'acceptance_bill')
             items.append(_item(
                 item_id='credit-payment-method', category='credit', rule_id='CREDIT_PAYMENT_METHOD', title='付款方式',
                 current=current, target=f'仅使用：{allowed_label}',
-                action=f'将付款方式调整为已生效信审允许的方式：{allowed_label}。',
+                action=f'将付款方式调整为已生效信用审核允许的方式：{allowed_label}。',
                 can_resolve_in_contract=bool(allowed), requires_credit_reapproval=not bool(allowed),
                 clause_id=payment_risk.get('clause_id', ''), source_ref=payment_risk.get('source_ref', ''),
             ))
@@ -173,15 +173,15 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
             allow_vmi = bool(conditions.get('allow_vmi_jit'))
             items.append(_item(
                 item_id='credit-delivery-mode', category='credit', rule_id='CREDIT_DELIVERY_MODE', title='交付模式',
-                current='合同包含 VMI/JIT', target='删除 VMI/JIT 或取得新的信审授权',
-                action='从合同中删除 VMI/JIT、安全库存或未确认的持续供货义务。' if not allow_vmi else '核对合同交付模式与信审授权是否一致。',
+                current='合同包含 VMI/JIT', target='删除 VMI/JIT 或取得新的信用审核授权',
+                action='从合同中删除 VMI/JIT、安全库存或未确认的持续供货义务。' if not allow_vmi else '核对合同交付模式与信用审核授权是否一致。',
                 can_resolve_in_contract=not allow_vmi, requires_credit_reapproval=allow_vmi,
                 clause_id=delivery_risk.get('clause_id', ''), source_ref=delivery_risk.get('source_ref', ''),
             ))
 
         special_credit = {
-            'CREDIT_CUSTOMER_MISMATCH': ('客户主体', '合同相对方与信审客户不一致', '重新绑定正确客户的信审版本或修正主体信息。'),
-            'CREDIT_CUSTOMER_UNCONFIRMED': ('客户主体', '合同相对方未确认', '补充并确认交易相对方，不能直接按当前信审放行。'),
+            'CREDIT_CUSTOMER_MISMATCH': ('客户主体', '合同相对方与信用审核客户不一致', '重新绑定正确客户的信用审核版本或修正主体信息。'),
+            'CREDIT_CUSTOMER_UNCONFIRMED': ('客户主体', '合同相对方未确认', '补充并确认交易相对方，不能直接按当前信用审核条件放行。'),
             'CREDIT_OVERDUE_LOCK': ('逾期锁定', '客户存在超过制度阈值的逾期', '先处理逾期或取得新的信用审批，不得仅修改合同规避锁定。'),
         }
         for risk in risks:
@@ -190,7 +190,7 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
                 title, current, action = special_credit[rule_id]
                 items.append(_item(
                     item_id=f'credit-{rule_id.lower()}', category='credit', rule_id=rule_id, title=title,
-                    current=current, target='完成客户级信审/主体核验', action=action,
+                    current=current, target='完成客户级信用审核或主体核验', action=action,
                     can_resolve_in_contract=False, requires_credit_reapproval=True,
                     clause_id=risk.get('clause_id', ''), source_ref=risk.get('source_ref', ''),
                 ))
@@ -220,7 +220,7 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
     for hint in report.get('review_hints') or []:
         items.append(_item(
             item_id=f"review-hint-{_risk_key(hint)}", category='workflow', rule_id=str(hint.get('rule_id') or 'REVIEW_HINT'),
-            title='待人工确认', current='证据或事实尚未完全确认', target='补件或完成审核员确认',
+            title='待人工确认', current='依据或事实尚未完全确认', target='补充材料或完成审核员确认',
             action=str(hint.get('suggestion') or '请补充材料并完成人工核验。'),
             can_resolve_in_contract=False, status='pending', clause_id=str(hint.get('clause_id') or ''),
             source_ref=str(hint.get('source_ref') or ''),
@@ -232,13 +232,13 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
     reapproval = [item for item in blockers if item['requires_credit_reapproval']]
     if reapproval:
         status = 'credit_reapproval'
-        next_action = '先处理客户级信审、主体或逾期锁定问题，再重新提交合同复审。'
+        next_action = '先处理客户级信用审核、主体或逾期锁定问题，再重新提交合同复审。'
     elif blockers or pending:
         status = 'contract_revision'
         next_action = '按最小修订路径调整合同，并在同一案件上传新版本复审。'
     else:
         status = 'ready'
-        next_action = '当前未发现阻断项；完成案件流程门禁后可继续签约交付。'
+        next_action = '当前未发现阻断项；完成案件流程中的放行条件后可继续签约交付。'
 
     return {
         'job_id': job_id,
