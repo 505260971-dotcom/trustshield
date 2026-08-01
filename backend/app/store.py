@@ -1391,6 +1391,169 @@ def get_case_center(case_id: str, actor: dict | None=None) -> dict | None:
         item['events'] = [dict(event) for event in c.execute('SELECT * FROM case_events WHERE case_id=? ORDER BY created_at DESC LIMIT 100', (case_id,))]
         return item
 
+def customer_headroom(customer_key: str, actor: dict, simulated_amount: float = 0) -> dict | None:
+    """Return the customer's current and projected credit headroom.
+
+    The CRM/ERP snapshot remains the source of existing exposure. Open
+    contract cases are shown separately as pipeline commitments so the UI can
+    explain the difference instead of silently double-counting a refreshed
+    snapshot. ``simulated_amount`` is read-only and is used to preview a new
+    order before it is written to any system.
+    """
+    workspace = get_customer_workspace(customer_key, actor)
+    if not workspace:
+        return None
+    try:
+        simulated = float(simulated_amount or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('模拟订单金额必须为数字') from exc
+    if simulated < 0:
+        raise ValueError('模拟订单金额不能为负数')
+
+    approved = [item for item in workspace.get('credit_cases', []) if item.get('status') == 'approved']
+    approved.sort(key=lambda item: (item.get('version') or 0, item.get('updated_at') or 0), reverse=True)
+    credit_case = get_credit_case(approved[0]['case_id']) if approved else None
+    conditions = (credit_case or {}).get('conditions') or {}
+    currency = str(conditions.get('currency') or 'CNY').upper()
+    try:
+        credit_limit = float(conditions.get('max_credit_amount') or 0)
+    except (TypeError, ValueError):
+        credit_limit = 0
+
+    snapshot = latest_credit_exposure_snapshot(credit_case['case_id']) if credit_case else None
+    payload = (snapshot or {}).get('payload') or {}
+    snapshot_available = bool(snapshot and payload)
+    try:
+        existing_exposure = (float(payload.get('current_receivables') or 0) + float(payload.get('booked_order_amount') or 0)) if snapshot_available else None
+    except (TypeError, ValueError):
+        existing_exposure = None
+    try:
+        overdue_days = int(payload.get('overdue_days') or 0)
+    except (TypeError, ValueError):
+        overdue_days = 0
+
+    case_filter = ''
+    case_params: list[Any] = []
+    if actor.get('role') == 'business':
+        case_filter = 'AND c.created_by=?'
+        case_params.append(actor.get('id'))
+    with _lock, _conn() as c:
+        rows = c.execute(f'''SELECT c.case_id,c.customer_name,c.current_stage,c.priority,c.updated_at,
+                                    d.job_id,d.version_label,d.original_name,d.created_at AS document_created_at,
+                                    r.status AS review_status,r.report_encrypted
+                             FROM contract_cases c
+                             LEFT JOIN case_documents d ON d.document_id=(
+                                 SELECT document_id FROM case_documents
+                                 WHERE case_id=c.case_id AND document_role IN ('main','revision')
+                                 ORDER BY created_at DESC LIMIT 1
+                             )
+                             LEFT JOIN reviews r ON r.id=d.job_id
+                             WHERE 1=1 {case_filter}
+                             ORDER BY c.updated_at DESC''', case_params).fetchall()
+
+    normalized_key = ''.join((workspace.get('customer_name') or '').strip().lower().split())[:200]
+    contracts = []
+    pipeline_amount = 0.0
+    for row in rows:
+        item = dict(row)
+        row_key = ''.join((item.get('customer_name') or '').strip().lower().split())[:200]
+        if row_key != normalized_key or item.get('current_stage') in {'archived', 'cancelled'}:
+            continue
+        report: dict[str, Any] = {}
+        if item.get('report_encrypted'):
+            try:
+                report = decrypt_json(item['report_encrypted']) or {}
+            except Exception:
+                report = {}
+        fields = report.get('contract_fields') or {}
+        amount = fields.get('total_amount')
+        try:
+            amount = float(str(amount).replace(',', '').replace('元', '').replace('人民币', '').strip()) if amount not in (None, '') else None
+        except (TypeError, ValueError):
+            amount = None
+        if amount is None:
+            for risk in report.get('risks') or []:
+                if risk.get('rule_id') == 'CREDIT_EXPOSURE':
+                    try:
+                        amount = float((risk.get('facts') or {}).get('contract_amount'))
+                    except (TypeError, ValueError):
+                        amount = None
+                    break
+        if amount is not None and amount >= 0:
+            pipeline_amount += amount
+        contracts.append({
+            'case_id': item.get('case_id'), 'job_id': item.get('job_id'),
+            'filename': item.get('original_name') or '', 'version_label': item.get('version_label') or '',
+            'stage': item.get('current_stage') or '', 'amount': amount,
+            'currency': fields.get('currency') or currency, 'review_status': item.get('review_status') or '',
+            'updated_at': item.get('updated_at') or item.get('document_created_at') or 0,
+        })
+
+    projected_without_simulation = (existing_exposure + pipeline_amount) if existing_exposure is not None else None
+    projected_with_simulation = (projected_without_simulation + simulated) if projected_without_simulation is not None else None
+    available_before_pipeline = (credit_limit - existing_exposure) if existing_exposure is not None else None
+    headroom_after_pipeline = (credit_limit - projected_without_simulation) if projected_without_simulation is not None else None
+
+    alerts: list[dict[str, str]] = []
+    if not credit_case:
+        alerts.append({'code': 'no_active_credit', 'level': 'blocked', 'message': '当前客户没有已生效信审版本，不能形成可用敞口边界。'})
+    elif not snapshot_available:
+        alerts.append({'code': 'missing_snapshot', 'level': 'blocked', 'message': '尚未读取有效 CRM/ERP 敞口快照，当前可用额度不能作为放行依据。'})
+    elif credit_limit <= 0:
+        alerts.append({'code': 'zero_credit_limit', 'level': 'blocked', 'message': '当前已生效信审额度为 0，不能承接新的客户敞口。'})
+    if overdue_days > 30:
+        alerts.append({'code': 'overdue_lock', 'level': 'blocked', 'message': f'客户最长逾期 {overdue_days} 天，超过 30 天锁定阈值。'})
+    if headroom_after_pipeline is not None and headroom_after_pipeline < 0:
+        alerts.append({'code': 'pipeline_over_limit', 'level': 'blocked', 'message': f'既有敞口与在途合同合计超出信审额度 {-headroom_after_pipeline:,.2f} {currency}。'})
+    elif headroom_after_pipeline is not None and credit_limit > 0 and projected_without_simulation >= credit_limit * 0.9:
+        alerts.append({'code': 'near_limit', 'level': 'warning', 'message': f'预计使用率已达到 {projected_without_simulation / credit_limit * 100:.1f}%，接近信审上限。'})
+
+    simulation_alerts: list[dict[str, str]] = []
+    if projected_with_simulation is not None and projected_with_simulation > credit_limit:
+        simulation_alerts.append({'code': 'simulation_over_limit', 'level': 'blocked', 'message': f'模拟新订单会超出信审额度 {(projected_with_simulation - credit_limit):,.2f} {currency}。'})
+    elif projected_with_simulation is not None and credit_limit > 0 and projected_with_simulation >= credit_limit * 0.9:
+        simulation_alerts.append({'code': 'simulation_near_limit', 'level': 'warning', 'message': f'模拟新订单后预计使用率为 {projected_with_simulation / credit_limit * 100:.1f}%。'})
+    if overdue_days > 30:
+        simulation_alerts.append({'code': 'simulation_overdue_lock', 'level': 'blocked', 'message': '客户存在逾期锁定，模拟订单不能绕过客户级信用门禁。'})
+
+    def status_for(value: float | None, value_alerts: list[dict[str, str]]) -> str:
+        if not credit_case:
+            return 'blocked'
+        if not snapshot_available:
+            return 'unknown'
+        if any(item.get('level') == 'blocked' for item in value_alerts):
+            return 'blocked'
+        if any(item.get('level') == 'warning' for item in value_alerts):
+            return 'warning'
+        return 'healthy'
+
+    return {
+        'customer_key': workspace.get('customer_key'), 'customer_name': workspace.get('customer_name'),
+        'status': status_for(projected_without_simulation, alerts), 'currency': currency,
+        'credit_case_id': credit_case.get('case_id') if credit_case else None,
+        'credit_version': credit_case.get('version') if credit_case else None,
+        'credit_status': credit_case.get('status') if credit_case else None,
+        'credit_limit': credit_limit if credit_case else None,
+        'snapshot': {
+            'source': snapshot.get('source') if snapshot else '', 'captured_at': snapshot.get('captured_at') if snapshot else None,
+            'as_of': payload.get('as_of') if snapshot else None, 'overdue_days': overdue_days,
+            'current_receivables': payload.get('current_receivables') if snapshot else None,
+            'booked_order_amount': payload.get('booked_order_amount') if snapshot else None,
+        },
+        'existing_exposure': existing_exposure, 'pipeline_contract_amount': pipeline_amount,
+        'available_before_pipeline': available_before_pipeline, 'projected_total_exposure': projected_without_simulation,
+        'headroom_after_pipeline': headroom_after_pipeline,
+        'utilization_pct': (projected_without_simulation / credit_limit * 100) if projected_without_simulation is not None and credit_limit > 0 else None,
+        'contracts': contracts, 'alerts': alerts,
+        'simulation': {
+            'amount': simulated, 'projected_total_exposure': projected_with_simulation,
+            'headroom': (credit_limit - projected_with_simulation) if projected_with_simulation is not None else None,
+            'utilization_pct': (projected_with_simulation / credit_limit * 100) if projected_with_simulation is not None and credit_limit > 0 else None,
+            'status': status_for(projected_with_simulation, simulation_alerts), 'alerts': simulation_alerts,
+        },
+    }
+
+
 def delete_historical_contract_case(case_id: str) -> dict:
     """Permanently remove a closed contract case, its review records, and stored files."""
     init_db()

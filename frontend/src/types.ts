@@ -41,6 +41,27 @@ export type CreditDocumentPreview = { document:CreditDocument; records:CreditSou
 export type CreditAssessmentEvent = { event_id?:string; created_at?:number; type:string; step?:number; action?:string; tool?:string; message?:string; reason_summary?:string; result_summary?:string; error?:string; progress?:any; sources?:any[]; claims?:any[]; requests?:string[] }
 export type CreditAssessmentStatus = { assessment_id?:string; case_id?:string; status:'running'|'done'|'error'|'none'; model_version?:string; started_at?:number; steps:string[]; events?:CreditAssessmentEvent[]; trace?:any[]; live_evidence?:any[]; live_claims?:any[]; active?:{type?:string;message?:string;step?:number;tool?:string;updated_at?:number}; error?:string }
 export type CreditExposure = { snapshot_id?:string; source?:string; captured_at?:number; payload?:{current_receivables:number;booked_order_amount:number;overdue_amount:number;overdue_days:number;currency?:string;as_of?:number;note?:string}|null }
+export type SignabilityItem = {
+  id:string; category:'credit'|'contract'|'workflow'; rule_id:string; title:string
+  current:string; target:string; action:string; can_resolve_in_contract:boolean
+  requires_credit_reapproval:boolean; status:'blocked'|'pending'|'passed'; clause_id?:string; source_ref?:string
+}
+export type SignabilityPlan = {
+  job_id?:string; status:'ready'|'contract_revision'|'credit_reapproval'; signable:boolean; next_action:string
+  credit:{case_id?:string; customer_name?:string; version?:number; currency?:string; max_credit_amount?:number; existing_exposure?:number|null; contract_amount?:number|null; projected_exposure?:number|null; available_for_contract?:number|null}
+  counts:{total:number; blocked:number; repairable:number; requires_credit_reapproval:number; pending:number}; items:SignabilityItem[]
+}
+export type CustomerHeadroomAlert = { code:string; level:'blocked'|'warning'|'info'; message:string }
+export type CustomerHeadroomContract = { case_id:string; job_id?:string; filename?:string; version_label?:string; stage:string; amount?:number|null; currency?:string; review_status?:string; updated_at?:number }
+export type CustomerHeadroom = {
+  customer_key:string; customer_name:string; status:'healthy'|'warning'|'blocked'|'unknown'; currency:string
+  credit_case_id?:string|null; credit_version?:number|null; credit_status?:string|null; credit_limit?:number|null
+  snapshot:{source?:string; captured_at?:number|null; as_of?:number|null; overdue_days?:number; current_receivables?:number|null; booked_order_amount?:number|null}
+  existing_exposure?:number|null; pipeline_contract_amount:number; available_before_pipeline?:number|null
+  projected_total_exposure?:number|null; headroom_after_pipeline?:number|null; utilization_pct?:number|null
+  contracts:CustomerHeadroomContract[]; alerts:CustomerHeadroomAlert[]
+  simulation:{amount:number; projected_total_exposure?:number|null; headroom?:number|null; utilization_pct?:number|null; status:'healthy'|'warning'|'blocked'|'unknown'; alerts:CustomerHeadroomAlert[]}
+}
 export type CreditAssessment = { assessment_id?:string; case_id?:string; status:'none'|'running'|'done'|'error'; model_version?:string; policy_version?:string; report?:any; evidence?:any[]; error?:string; created_at?:number; completed_at?:number }
 export type ReviewRequest = { business_type?: string; credit_case_id?:string; parent_job_id?: string; assignee_id?: string; priority?: string; due_at?: number; request_note?: string; case_id?:string; document_role?:string }
 export type TeamMember = { id: string; display_name: string; role: string }

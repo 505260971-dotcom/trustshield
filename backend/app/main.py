@@ -26,6 +26,7 @@ from .services.integrations import APPROVAL_ROLES, crm, oa
 from .services.translate import run_translate
 from .services.credit import assess_credit_compliance, assess_customer_binding
 from .services.parse import PARSER_VERSION, parse_contract, read_paragraphs, text_asset_status
+from .services.signability import calculate_signability
 
 app = FastAPI(title='ContractGuard 合同评审协作中心', version='3.0')
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=['GET','POST','PATCH','DELETE'], allow_headers=['Authorization','Content-Type'])
@@ -609,6 +610,24 @@ async def workbox(bucket: str, limit: int=200, user=Depends(current_user)):
 async def customer_workspaces(limit: int=200, user=Depends(current_user)):
     return {'items': store.list_customer_workspaces(user, limit)}
 
+@app.get('/api/customer-workspaces/{customer_key}/headroom')
+async def customer_headroom(customer_key: str, user=Depends(current_user)):
+    result = store.customer_headroom(customer_key, user)
+    if not result:
+        raise HTTPException(404, '客户不存在或无权查看')
+    return result
+
+@app.post('/api/customer-workspaces/{customer_key}/headroom/simulate')
+async def customer_headroom_simulate(customer_key: str, body: dict, user=Depends(current_user)):
+    try:
+        result = store.customer_headroom(customer_key, user, body.get('amount') or body.get('additional_amount') or 0)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not result:
+        raise HTTPException(404, '客户不存在或无权查看')
+    store.audit(user, 'customer.headroom_simulate', 'customer', result['customer_key'], {'amount': result['simulation']['amount'], 'status': result['simulation']['status']})
+    return result
+
 @app.get('/api/customer-workspaces/{customer_key}')
 async def customer_workspace_detail(customer_key: str, user=Depends(current_user)):
     result = store.get_customer_workspace(customer_key, user)
@@ -869,6 +888,16 @@ async def stream(job_id: str, user=Depends(require('review:read'))):
 
 @app.get('/api/reviewers')
 async def reviewers(user=Depends(require('review:read'))): return {'items':store.list_reviewers()}
+
+@app.get('/api/reviews/{job_id}/signability')
+async def review_signability(job_id: str, user=Depends(require('review:read'))):
+    _assert_case_access(job_id, user)
+    rec = store.get_review(job_id)
+    if not rec:
+        raise HTTPException(404, 'not found')
+    result = calculate_signability(rec.get('report') or {}, store.list_findings(job_id), job_id)
+    store.audit(user, 'review.signability', 'review', job_id, {'status': result.get('status'), 'blocked': result.get('counts', {}).get('blocked', 0)})
+    return result
 
 @app.get('/api/reviews/{job_id}')
 async def review_detail(job_id: str,user=Depends(require('review:read'))):

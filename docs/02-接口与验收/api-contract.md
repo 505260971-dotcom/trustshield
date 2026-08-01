@@ -35,6 +35,7 @@
 | `POST` | `/api/case-center/cases/{case_id}/documents` | 向既有案件上传主合同、修订版或关联文件并启动审查 |
 | `POST` | `/api/case-center/cases/{case_id}/actions/{action}` | 推进案件阶段（领取、补件、审批、归档等） |
 | `GET` | `/api/reviews/{job_id}` | 获取文档版本的完整审查报告与风险处置记录 |
+| `GET` | `/api/reviews/{job_id}/signability` | 基于当前报告、信审快照和案件发现计算“距可签约还差什么”；只读，不改变放行门禁 |
 | `GET` | `/api/reviews/{job_id}/status` | 查询 AI 审查状态 |
 | `GET` | `/api/reviews/{job_id}/stream` | 订阅 AI 审查步骤与结果 |
 | `GET` | `/api/stats` | 获取工作台统计 |
@@ -62,3 +63,10 @@
 | `POST` | `/api/integrations/crm/credit-hooks` | CRM 预留端口：推送客户并可选创建信审草稿 |
 | `GET` | `/api/integrations/crm/credit-hooks` | 列出 CRM hook |
 | `GET` | `/api/integrations/crm/credit-hooks/{hook_id}` | 查询单个 hook |
+
+## 客户级动态敞口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/customer-workspaces/{customer_key}/headroom` | 汇总已生效信审上限、CRM/ERP 既有敞口和未归档在途合同，返回客户级可用敞口与预警 |
+| `POST` | `/api/customer-workspaces/{customer_key}/headroom/simulate` | 只读模拟新订单加入后的总敞口；请求体 `{ "amount": 100000 }`，不会写入 CRM/ERP 或信审快照 |

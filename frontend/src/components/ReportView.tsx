@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Card, Row, Col, Statistic, Result, Tabs, Table, Descriptions, Empty, List, Button, Collapse, Dropdown, Space, Typography, Alert, Tag, message, Modal, Input, Select } from 'antd'
 import { DownloadOutlined, SafetyCertificateOutlined, ReloadOutlined, FileWordOutlined, TranslationOutlined, SwapOutlined, FileTextOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
-import type { KnowledgeItem, Report, Risk, RuleItem, VersionComparison } from '../types'
+import type { KnowledgeItem, Report, Risk, RuleItem, SignabilityPlan as SignabilityPlanData, VersionComparison } from '../types'
 import { riskTableCols, clauseTableCols, overallColor, downloadText, roleRiskVisible, roleRiskHighlight } from './common'
 import { useRole, ROLE_DESC } from '../context/RoleContext'
 import { api } from '../services/api'
@@ -11,6 +11,7 @@ import TaskContextBanner from './TaskContextBanner'
 import ContractReviewWorkspace from './ContractReviewWorkspace'
 import CaseReviewAssistant from './CaseReviewAssistant'
 import { ContractDecisionSummary, VersionEffectSummary } from './ContractDecisionSummary'
+import SignabilityPlan from './SignabilityPlan'
 
 const { Text } = Typography
 
@@ -43,6 +44,8 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   const [compareOpen, setCompareOpen] = useState(false)
   const [baselineId, setBaselineId] = useState('')
   const [comparison, setComparison] = useState<VersionComparison|null>(null)
+  const [signability, setSignability] = useState<SignabilityPlanData|null>(null)
+  const [signabilityLoading, setSignabilityLoading] = useState(false)
   const [similarCases, setSimilarCases] = useState<KnowledgeItem[]>([])
   const [activeLang, setActiveLang] = useState('en')
   const [focusClauseId, setFocusClauseId] = useState<string>('')
@@ -55,6 +58,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   const allRisks = report.risks || []
   const reviewHints = report.review_hints || []
   const visibleRisks = allRisks.filter(r => roleRiskVisible(r, role))
+  const visiblePlanItems = signability?.items.filter(item => item.category !== 'contract' || visibleRisks.some(risk => risk.rule_id === item.rule_id))
   const hidden = allRisks.length - visibleRisks.length
   const riskKey = (risk: Risk) => risk.finding_id || `${risk.clause_id}-${risk.rule_id}-${risk.level}`
   const severityWeight: Record<string, number> = { high: 0, mid: 1, low: 2 }
@@ -71,6 +75,14 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
       ? '当前没有可直接处置的风险，但仍有条款事实、主体或审批例外需要人工确认。'
       : '当前报告未发现需要处置的风险，可继续核对合同字段、审查依据和导出交付物。'
   const reportNextAction = visibleRisks.length > 0 ? '从左侧问题条款导航开始，逐条查看原文、证据和规则底线。' : reviewHints.length > 0 ? '先处理待人工确认事项，再决定是否可以继续签署。' : '核对审查链路和合同字段后导出留档。'
+
+  useEffect(() => {
+    let cancelled = false
+    if (!jid) { setSignability(null); return () => { cancelled = true } }
+    setSignabilityLoading(true)
+    api.signability(jid).then(result => { if (!cancelled) setSignability(result) }).catch(() => { if (!cancelled) setSignability(null) }).finally(() => { if (!cancelled) setSignabilityLoading(false) })
+    return () => { cancelled = true }
+  }, [jid])
 
   const exportMarkdown = () => {
     const L: string[] = []
@@ -180,6 +192,8 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
       <TaskContextBanner role={role} title="合同审查结果工作区" description={reportContext} nextAction={reportNextAction}/>
 
       <ContractDecisionSummary report={report} visibleRisks={visibleRisks} onSelectRisk={selectRisk} />
+
+      <SignabilityPlan plan={signability} loading={signabilityLoading} items={visiblePlanItems} />
 
       <CaseReviewAssistant report={report} risks={visibleRisks} onSelectRisk={selectRisk} />
 
