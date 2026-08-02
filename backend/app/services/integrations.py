@@ -77,7 +77,7 @@ class OAAdapter:
             'mock': True,
             'status': f['status'],
             'accepted_count': len(f['accepted']),
-            'export_hint': '请在 ContractGuard 导出 revised（带修订）或 plain（无修订）稿',
+            'export_hint': '请在 TrustShield 导出 revised（带修订）或 plain（无修订）稿',
         }
 
     def get_flow(self, flow_id):

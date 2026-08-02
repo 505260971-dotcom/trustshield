@@ -1,7 +1,7 @@
 """DashScope/OpenAI-compatible embedding recall for credit evidence.
 
 Vectors are request-scoped and kept only in process memory.  Source documents
-and their text assets stay in ContractGuard's encrypted store; the remote
+and their text assets stay in TrustShield's encrypted store; the remote
 embedding provider receives passages only when the administrator explicitly
 enables financial-data transfer for this stage.
 """

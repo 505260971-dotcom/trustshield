@@ -28,3 +28,7 @@ frontend/dist/
 *.sqlite
 *.db
 .claude/
+
+# PPT export tool dependencies (installed locally)
+docs/03-演示与交付/PPT图片导出/node_modules/
+docs/03-演示与交付/PPT图片导出/_frames/

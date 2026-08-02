@@ -28,7 +28,7 @@ from .services.credit import assess_credit_compliance, assess_customer_binding
 from .services.parse import PARSER_VERSION, parse_contract, read_paragraphs, text_asset_status
 from .services.signability import calculate_signability
 
-app = FastAPI(title='ContractGuard 合同评审协作中心', version='3.0')
+app = FastAPI(title='TrustShield 合同评审协作中心', version='3.0')
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=['GET','POST','PATCH','DELETE'], allow_headers=['Authorization','Content-Type'])
 app.include_router(auth_router)
 

@@ -1,4 +1,4 @@
-# ContractGuard 文档索引
+# 信盾 TrustShield 文档索引
 
 本目录按交付用途分类，便于 GitHub 浏览与黑客松评审。
 
@@ -20,4 +20,4 @@
 7. `03-演示与交付/demo-script.md` 5 分钟演示
 8. `02-接口与验收/` 联调与回归
 
-可运行工程在仓库**根目录**（`backend/`、`frontend/`、`dev.ps1`）。
+可运行工程在仓库**根目录**（`backend/`、`frontend/`、`dev.py`）。一条命令启动开发服务器：`python dev.py`。

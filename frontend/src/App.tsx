@@ -175,7 +175,7 @@ function AppInner() {
 
   return <Layout className="app-shell" style={{ minHeight: '100vh' }}>
     <Sider collapsible breakpoint="lg" collapsedWidth="0" theme="dark" width={236}>
-      <div className="brand"><SafetyCertificateOutlined /><span>ContractGuard</span></div>
+      <div className="brand"><SafetyCertificateOutlined /><span>TrustShield</span></div>
       {canCreateCredit && <div className="sider-create"><Dropdown menu={{ items: createMenu, onClick: ({ key }) => key === 'contract' ? createContractFor() : createCreditFor() }} trigger={['click']}><Button type="primary" block icon={<FileAddOutlined />}>{role === 'business' ? '发起业务申请' : '新建信用审核版本'}</Button></Dropdown></div>}
       <Menu theme="dark" mode="inline" selectedKeys={[activeMenuFor(activeRoute.page)]} items={menu} onSelect={event => go(`/${event.key}`)} />
       <div className="sider-foot"><Text>合同协同与风险控制</Text></div>

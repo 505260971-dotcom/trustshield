@@ -64,7 +64,7 @@ def _add_word_comments(path, risks):
             finder.Forward = True
             finder.Wrap = 0  # wdFindStop
             if finder.Execute():
-                comment = f"ContractGuard {risk.get('rule_id', '')} · {risk.get('level', '')}\r\n建议：{risk.get('suggestion', '请按底线条款修订')}"
+                comment = f"TrustShield {risk.get('rule_id', '')} · {risk.get('level', '')}\r\n建议：{risk.get('suggestion', '请按底线条款修订')}"
                 document.Comments.Add(search_range, comment)
                 replacement = (risk.get('suggestion') or '').strip()
                 # The export route supplies only human-adopted findings. Replacing

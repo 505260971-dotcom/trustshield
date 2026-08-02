@@ -32,7 +32,7 @@ def main():
             raise SystemExit(f'未匹配样本: {only}')
     total_hit = total_gold = total_extra = 0
     print('='*80)
-    print('ContractGuard 效果验证  (样本 -> Agent 命中 vs 人工金标)')
+    print('TrustShield 效果验证  (样本 -> Agent 命中 vs 人工金标)')
     print('='*80)
     for fname, business_type, gold in rows:
         p = os.path.join(DATA, fname)
