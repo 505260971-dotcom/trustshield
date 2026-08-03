@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Alert, Button, Card, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd'
-import { AuditOutlined, DeleteOutlined, EditOutlined, PlusOutlined, TeamOutlined } from '@ant-design/icons'
+import { AuditOutlined, DeleteOutlined, EditOutlined, ExclamationCircleOutlined, PlusOutlined, TeamOutlined } from '@ant-design/icons'
 import { api } from '../services/api'
 import { fmtTime } from '../components/common'
 import { useAuth } from '../context/AuthContext'
@@ -27,6 +27,7 @@ export default function AdminPage(){
   const [editingUser,setEditingUser]=useState<User|null>(null)
   const [ruleOpen,setRuleOpen]=useState(false)
   const [editing,setEditing]=useState<RuleItem|null>(null)
+  const [resetting,setResetting]=useState(false)
   const [userForm]=Form.useForm()
   const [ruleForm]=Form.useForm()
   const [routeForm]=Form.useForm()
@@ -72,6 +73,26 @@ export default function AdminPage(){
   const createRouteDraft=async()=>{try{const result=await api.createCreditRouteDraft();message.success('已创建信用审核审批路径草稿 '+result.version);await load();await loadRoute(result.version)}catch(e:any){message.error(e.message||'创建审批路径草稿失败')}}
   const saveRoute=async()=>{try{if(!route)return;const config=await routeForm.validateFields();await api.updateCreditRoute(route.version,config);message.success('信用审核审批路径草稿已保存');await loadRoute(route.version)}catch(e:any){if(e?.errorFields)return;message.error(e.message||'保存审批路径草稿失败')}}
   const publishRoute=async()=>{try{if(!route)return;await api.publishCreditRouteVersion(route.version);message.success('信用审核审批路径已发布，新提交的信用审核将按此路径处理');await load()}catch(e:any){message.error(e.message||'发布审批路径失败')}}
+  const confirmResetBusinessData=()=>{
+    Modal.confirm({
+      title:'重置全部业务演示数据？',
+      icon:<ExclamationCircleOutlined />,
+      content:'这会永久删除信审案件、财报与额度快照、合同案件、审查结果、风险动作、审批/补件/翻译/导出记录、流程任务、审计历史和上传材料。人员账户、LLM/重排/Embedding 配置、规则版本、信用模型及审批路径不会被删除。当前操作不可恢复。',
+      okText:'确认清空',
+      okButtonProps:{danger:true},
+      cancelText:'取消',
+      onOk:async()=>{
+        setResetting(true)
+        try{
+          const result=await api.resetBusinessData()
+          const errors=result?.file_cleanup_errors?.length||0
+          if(errors)message.warning(`业务记录已重置，但有 ${errors} 个上传文件未能删除，请检查数据目录`)
+          else message.success(`业务演示数据已重置，共清理 ${result?.deleted_total||0} 条记录`)
+          await load()
+        }catch(e:any){message.error(e.message||'业务数据重置失败')}finally{setResetting(false)}
+      },
+    })
+  }
 
   const activeMembers=users.filter(member=>member.active).length
   const draftCount=versions.filter(version=>version.status==='draft').length+(route?.status==='draft'?1:0)
@@ -86,6 +107,9 @@ export default function AdminPage(){
       <div className="compact-metric metric-warning"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>待发布草稿</small><strong>{draftCount}</strong><em>发布前请完成复核</em></div></div>
       <div className="compact-metric"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>审计记录</small><strong>{audit.length}</strong><em>当前加载的操作日志</em></div></div>
     </section>
+    <Card className="governance-card" title="业务演示数据重置" extra={<Button danger loading={resetting} icon={<DeleteOutlined/>} onClick={confirmResetBusinessData}>重置全部业务记录</Button>}>
+      <Alert showIcon type="warning" message="仅清理业务数据，不影响登录和模型配置" description="用于重新开始一轮演示。会清除所有信审、合同审查及其材料、评估、风险、审批、补件、流程任务、审计历史和上传文件；人员账户、LLM 配置、重排/向量配置、规则版本、信用模型和审批路径会保留。执行前请确认当前没有需要保留的记录。"/>
+    </Card>
     <div className="governance-stack">
     <Card className="member-admin-card" title={<Space><TeamOutlined/>团队成员与分级审批权限</Space>} extra={<Button type="primary" icon={<PlusOutlined/>} onClick={openCreateUser}>新增成员</Button>}>
       <Alert showIcon type="info" style={{marginBottom:16}} message="成员账户管理" description="管理员可新增、编辑、重置密码、停用或永久删除账户。永久删除不可恢复；系统会阻止删除当前登录账户或最后一名启用的最终审批人。"/>

@@ -238,6 +238,42 @@ async def credit_route_version_publish(version: str, user=Depends(require('admin
     store.audit(user, 'credit_route.publish', 'credit_route_version', version)
     return result
 
+
+@app.post('/api/admin/data/reset')
+async def admin_business_data_reset(user=Depends(require('admin:cases'))):
+    """Clear operational demo data while preserving identity and configuration."""
+    # A background worker that finishes after the reset could recreate a
+    # deleted record.  Refuse the operation while any review/translation job
+    # is still running, then hold the two job locks across the reset and clear
+    # their short-lived in-memory state as part of the same critical section.
+    with CREDIT_JOB_LOCK, REVIEW_JOB_LOCK:
+        active_credit = [key for key, value in CREDIT_JOBS.items() if value.get('status') == 'running']
+        active_review = [key for key, value in JOBS.items() if value.get('status') == 'running']
+        active_translation = [key for key, value in TJOBS.items() if value.get('status') == 'running']
+        if active_credit or active_review or active_translation:
+            parts = []
+            if active_credit:
+                parts.append(f'{len(active_credit)} 个信审 Agent 任务')
+            if active_review:
+                parts.append(f'{len(active_review)} 个合同审查任务')
+            if active_translation:
+                parts.append(f'{len(active_translation)} 个翻译任务')
+            raise HTTPException(409, '当前仍有' + '、'.join(parts) + '运行中，请等待完成后再重置')
+        result = store.reset_business_data()
+        JOBS.clear()
+        CREDIT_JOBS.clear()
+        TJOBS.clear()
+    # reset_business_data clears the historical audit trail as requested; keep
+    # one fresh event so the destructive administrative operation is itself
+    # accountable without bringing back any prior business history.
+    store.audit(user, 'admin.business_data_reset', 'business_data', '', {
+        'deleted_total': result['deleted_total'],
+        'files_removed': result['files_removed'],
+        'file_cleanup_errors': len(result.get('file_cleanup_errors') or []),
+        'preserved_tables': result['preserved'],
+    })
+    return result
+
 # Credit review is deliberately separate from contract review.  A contract can
 # read a published decision but cannot create, alter, or approve one.
 @app.get('/api/credit/decisions')

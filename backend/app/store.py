@@ -4,17 +4,38 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import shutil
 import sqlite3
 import threading
 import time
 import uuid
 from typing import Any
 
-from .config import DATA_DIR, DATA_ENCRYPTION_KEY, INITIAL_ADMIN_NAME, INITIAL_ADMIN_PASSWORD, INITIAL_ADMIN_USERNAME
+from .config import (DATA_DIR, DATA_ENCRYPTION_KEY, INITIAL_ADMIN_NAME, INITIAL_ADMIN_PASSWORD,
+                     INITIAL_ADMIN_USERNAME, UPLOAD_DIR)
 from .services.security import ROLES, decrypt_json, encrypt_json, password_hash, verify_password
 
 DB_PATH = os.path.join(DATA_DIR, 'contractguard.db')
 _lock = threading.Lock()
+
+# These are operational/demo records.  The administrator reset intentionally
+# never touches users, model runtime configuration, or versioned policy
+# catalogs.  Keep this list explicit: deleting by "all tables except..." would
+# make a future schema migration capable of removing credentials by accident.
+BUSINESS_RESET_TABLES = (
+    # Contract review children and the contract case itself.
+    'review_actions', 'finding_approvals', 'material_files', 'material_requests',
+    'export_snapshots', 'contract_versions', 'translations', 'case_attachments',
+    'review_findings', 'mask_mappings', 'case_documents', 'case_events',
+    'reviews', 'workflow_tasks', 'contract_cases', 'clause_knowledge',
+    # Credit review children and the credit case itself.
+    'credit_evidence', 'credit_document_text_assets', 'credit_documents',
+    'credit_exposure_snapshots', 'credit_assessments', 'credit_cases',
+    # The audit trail is reset with the demo data.  The endpoint writes one
+    # fresh reset event afterwards so the destructive action remains visible.
+    'audit_events',
+)
+PRESERVED_DATA_TABLES = ('users', 'rule_versions', 'rule_definitions', 'credit_model_versions', 'credit_route_versions')
 
 def _conn():
     c = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
@@ -296,6 +317,78 @@ def init_db():
     _seed_rule_catalog()
     _seed_credit_model()
     _seed_credit_route_catalog()
+
+
+def _clear_business_uploads() -> dict[str, Any]:
+    """Remove generated business files without touching config or OCR assets.
+
+    All upload paths are expected below ``DATA_DIR/uploads``.  Resolve the
+    directory before deleting any child so a misconfigured path cannot turn a
+    demo reset into a broad filesystem delete.
+    """
+    root = os.path.realpath(UPLOAD_DIR)
+    expected = os.path.realpath(os.path.join(DATA_DIR, 'uploads'))
+    if root != expected:
+        raise RuntimeError('业务文件目录不在数据目录 uploads 下，已拒绝清理')
+    os.makedirs(root, exist_ok=True)
+    removed = 0
+    errors: list[str] = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError as exc:
+        return {'removed': 0, 'errors': [str(exc)[:240]]}
+    for entry in entries:
+        path = entry.path
+        try:
+            # Never follow a symlink while performing a destructive reset.
+            if entry.is_symlink():
+                os.unlink(path)
+            elif entry.is_dir(follow_symlinks=False):
+                child_root = os.path.realpath(path)
+                if os.path.commonpath([root, child_root]) != root:
+                    raise RuntimeError('发现越界业务文件目录，已拒绝清理')
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            removed += 1
+        except Exception as exc:  # pragma: no cover - platform-specific file locks
+            errors.append(f'{path}: {str(exc)[:180]}')
+    return {'removed': removed, 'errors': errors[:20]}
+
+
+def reset_business_data() -> dict[str, Any]:
+    """Reset all persisted credit/contract workflow data for a fresh demo.
+
+    User accounts, model runtime configuration (``config.json``), bootstrap
+    secrets, and versioned rule/model/approval-path catalogs are deliberately
+    preserved.  The operation is transactional for SQLite rows; generated
+    upload files are removed immediately after the transaction commits.
+    """
+    init_db()
+    deleted: dict[str, int] = {}
+    with _lock, _conn() as c:
+        for table in BUSINESS_RESET_TABLES:
+            # All current installations create these tables, but tolerate an
+            # older database so an upgrade/reset remains idempotent.
+            exists = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if not exists:
+                continue
+            deleted[table] = int(c.execute(f'SELECT COUNT(*) AS n FROM "{table}"').fetchone()['n'])
+            c.execute(f'DELETE FROM "{table}"')
+        preserved = {}
+        for table in PRESERVED_DATA_TABLES:
+            exists = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if exists:
+                preserved[table] = int(c.execute(f'SELECT COUNT(*) AS n FROM "{table}"').fetchone()['n'])
+    files = _clear_business_uploads()
+    return {
+        'deleted': deleted,
+        'deleted_total': sum(deleted.values()),
+        'preserved': preserved,
+        'files_removed': files['removed'],
+        'file_cleanup_errors': files['errors'],
+        'reset_at': time.time(),
+    }
 
 def _seed_rule_catalog():
     """Migrate the original immutable source list into the first published catalog."""

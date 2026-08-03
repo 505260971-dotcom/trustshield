@@ -365,6 +365,10 @@ def _controller_instruction(progress: dict[str, Any], step: int, max_steps: int,
     if tool_rounds_without_claim >= 4 and not progress['verified_claim_count']:
         return ('收敛检查：你已连续进行了多轮工具读取但尚未提交任何事实。请基于已可见来源块优先提交能够逐字引用的主体、'
                 '财务口径或指标事实；若来源确实不能证明某项，只请求具体补充材料。不要重复相同检索或页面读取。')
+    if progress['financial_context_verified'] and progress['missing_metrics']:
+        return ('财务口径已经核验通过。下一步优先从已可见的同页来源块中，使用该财务口径 Claim 的 claim_id 逐项提交缺失的'
+                '核心财务指标；同一段来源可拆成多个指标 Claim。只有已可见来源确实没有某项时，才调用工具检索。不要重复读取'
+                '同一页面，也不要因为一项缺失而放弃已可验证的其他指标。')
     if remaining <= 4:
         return (f'剩余 {remaining} 步。请先检查已验证覆盖：主体={progress["identity_verified"]}，'
                 f'财务口径={progress["financial_context_verified"]}，缺少指标={"、".join(progress["missing_metrics"]) or "无"}。'
@@ -408,12 +412,19 @@ def _page_context_selection(chunks: list[dict[str, Any]]) -> list[dict[str, Any]
     """Keep source context and structured rows together on mixed-format pages.
 
     A naive first-N slice can return introductory paragraphs while dropping the
-    end of a table containing the actual financial metrics.  This is a generic
-    document-structure selection rule, not a financial fact matcher.
+    financial facts later on the same page.  For prose-only DOCX extraction we
+    therefore retain the page header and trailing body in one request.  This
+    is a generic document-structure rule, not a financial fact matcher.
     """
     prose = [item for item in chunks if item.get('source_kind') not in {'table', 'sheet'}]
     structured = [item for item in chunks if item.get('source_kind') in {'table', 'sheet'}]
-    return [*prose[:6], *structured[:10]][:16]
+    if structured:
+        return [*prose[:8], *structured[:16]][:24]
+    if len(prose) <= 24:
+        return prose
+    # Keep initial document identity/period/units plus the end of the page,
+    # where DOCX paragraph extraction often places the financial summary.
+    return [*prose[:8], *prose[-16:]]
 
 
 def _invoke_agent_with_one_retry(messages: list[Any]) -> tuple[Any, int]:
@@ -567,8 +578,8 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
                         technical_errors.append(str(exc))
                         observation = {'tool': tool, 'error': str(exc), 'retryable': True}
             elif tool == 'read_evidence':
-                ids = [str(item) for item in arguments.get('chunk_ids') or []][:12]
-                selected = _visible([chunks_by_id[item] for item in ids if item in chunks_by_id])
+                ids = [str(item) for item in arguments.get('chunk_ids') or []][:24]
+                selected = _visible([chunks_by_id[item] for item in ids if item in chunks_by_id], limit=24)
                 observation = {'tool': tool, 'chunks': _observation_views(selected)}
             elif tool == 'get_document_outline':
                 document_id = str(arguments.get('document_id') or '')
@@ -584,7 +595,7 @@ def run_react_credit_audit(case: dict[str, Any], documents: list[dict[str, Any]]
                     page = 0
                 selected = _page_context_selection([item for item in chunks if item.get('document_id') == document_id and item.get('page') == page])
                 observation = {'tool': tool, 'document_id': document_id, 'page': page,
-                               'chunks': _observation_views(_visible(selected, limit=16))}
+                               'chunks': _observation_views(_visible(selected, limit=24))}
                 if not selected:
                     observation['error'] = 'page_context_not_found'
             elif tool == 'get_table_context':

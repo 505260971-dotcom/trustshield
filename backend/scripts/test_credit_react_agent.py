@@ -40,6 +40,15 @@ def main():
     assert react._claim_kind({'entity_name': '测试客户'}) == 'identity'
     assert react._claim_kind({'period': '2025年度', 'scope': '合并口径', 'currency': '人民币', 'source_unit': '元'}) == 'financial_context'
     assert react._claim_kind({'metric': '营业收入', 'value': 1}) == 'financial_metric'
+    # Page context must not discard the financial body merely because a DOCX
+    # stores it as ordinary paragraphs after a long report header.
+    prose_page = [{'chunk_id': f'DOC:R{i}', 'source_kind': 'text', 'text': str(i)} for i in range(1, 27)]
+    selected_ids = [item['chunk_id'] for item in react._page_context_selection(prose_page)]
+    assert len(selected_ids) == 24 and 'DOC:R1' in selected_ids and 'DOC:R14' in selected_ids and 'DOC:R21' in selected_ids
+    controller = react._controller_instruction({'verified_claim_count': 2, 'identity_verified': True,
+                                                 'financial_context_verified': True, 'verified_metrics': [],
+                                                 'missing_metrics': sorted(react.CORE_METRICS)}, 10, 16, 0)
+    assert '已可见的同页来源块' in controller
     split_header_chunks = {
         'DOC:H1': {'text': '测试客户 2025年度合并财务报表', 'document_id': 'DOC', 'source_ref': '第1页 · 页眉', 'page': 1},
         'DOC:H2': {'text': '财务数据币种：CNY；金额单位：人民币元', 'document_id': 'DOC', 'source_ref': '第1页 · 口径', 'page': 1},

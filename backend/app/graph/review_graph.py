@@ -114,12 +114,18 @@ def _local_contract_fields(clauses):
     text = '\n'.join(str(item.get('text') or '') for item in clauses or [])
     parties = {}
     for label in ('甲方', '乙方'):
-        found = re.search(rf'{label}\s*[：:]\s*([^\n\r；;]{{2,120}})', text)
+        # DOCX templates commonly write labels as “甲方（买方）：…”.  The
+        # semantic model may return syntactically valid but incomplete JSON, so
+        # this local parser must recognise both the short and qualified forms.
+        found = re.search(rf'{label}(?:\s*[（(][^）)]{{0,40}}[）)])?\s*[：:]\s*([^\n\r；;]{{2,120}})', text)
         if found:
             value = found.group(1).strip()
             # The next party label is a stronger delimiter than punctuation in
             # one-line TXT acceptance fixtures and simple purchase orders.
-            value = re.split(r'\s*(?:甲方|乙方)\s*[：:]', value, maxsplit=1)[0].strip(' ，,。')
+            value = re.split(
+                r'\s*(?:(?:甲方|乙方)(?:\s*[（(][^）)]{0,40}[）)])?|项目名称|合同业务类型|合同总金额|合同编号|修订日期)\s*[：:]',
+                value, maxsplit=1,
+            )[0].strip(' ，,。')
             parties[label] = value
     return {'our_party': '乙方', 'parties': parties}
 
@@ -132,6 +138,17 @@ def node_extract_fields(state):
         f = json.loads(msg.content)
     except Exception:
         f = _local_contract_fields(state.get('clauses') or [])
+    # A valid JSON response is not necessarily a complete extraction.  Preserve
+    # the model's richer fields, but fail closed only after the deterministic
+    # parser has had a chance to backfill an explicitly written contract party.
+    if not isinstance(f, dict):
+        f = {}
+    local_fields = _local_contract_fields(state.get('clauses') or [])
+    model_parties = f.get('parties') if isinstance(f.get('parties'), dict) else {}
+    local_parties = local_fields.get('parties') or {}
+    f['parties'] = {**local_parties, **{key: value for key, value in model_parties.items() if str(value or '').strip()}}
+    if not f.get('our_party'):
+        f['our_party'] = local_fields.get('our_party') or '乙方'
     # 字段只在强模型返回后于本地恢复，保证报告中的合同主体和金额可追溯。
     mapping = state.get('mapping', {})
     state['contract_fields'] = _restore_field_values(_hydrate_masked_amount(f, mapping), mapping)
