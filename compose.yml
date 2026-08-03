@@ -6,6 +6,10 @@ services:
     image: trustshield:latest
     container_name: trustshield
     restart: unless-stopped
+    # Set these to the owner of an existing host-mounted data directory when
+    # migrating a non-container installation.  Defaults match appuser in the
+    # image and work with the named volume below.
+    user: "${TRUSTSHIELD_UID:-10001}:${TRUSTSHIELD_GID:-10001}"
     env_file:
       - ./backend/.env
     environment:
@@ -17,9 +21,12 @@ services:
       # separate reverse proxy or frontend in front of it.
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
     ports:
-      - "${TRUSTSHIELD_PORT:-8000}:8000"
+      # By default Docker publishes the service for a stand-alone deployment.
+      # Behind an existing local Nginx/Caddy proxy, set the bind address to
+      # 127.0.0.1 so the application port is not exposed directly.
+      - "${TRUSTSHIELD_BIND_ADDRESS:-0.0.0.0}:${TRUSTSHIELD_PORT:-8000}:8000"
     volumes:
-      - trustshield-data:/data
+      - "${TRUSTSHIELD_DATA_VOLUME:-trustshield-data}:/data"
 
 volumes:
   trustshield-data:
