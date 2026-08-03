@@ -1,17 +1,22 @@
-fastapi>=0.128,<1
-uvicorn[standard]>=0.30
-python-multipart>=0.0.9
-python-dotenv>=1.0
-python-docx>=1.1
-pdfplumber>=0.11
-openpyxl>=3.1
-cryptography>=44
-PyJWT>=2.10
-langgraph>=0.2
-langchain-openai>=0.3
+# Pin the runtime set verified by the production service.  The former open
+# ranges allowed a later OpenAI/LangChain release to be installed during a
+# Docker build; that release spent minutes in import-time type construction
+# and the web process could not begin listening.
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+python-multipart==0.0.32
+python-dotenv==1.2.2
+python-docx==1.2.0
+pdfplumber==0.11.10
+openpyxl==3.1.5
+cryptography==50.0.0
+PyJWT==2.10.1
+httpx==0.28.1
+langgraph==1.2.10
+langchain-openai==1.4.1
 # qwen3-rerank is called with the Python standard-library HTTP client; no
 # provider SDK is required.  Keep this explicit dependency list minimal.
 # OCR for scanned PDFs and image uploads.  The deployment must additionally
 # install the Tesseract executable and Chinese/English language packs.
-pillow>=10
-pytesseract>=0.3.10
+pillow==12.3.0
+pytesseract==0.3.13
