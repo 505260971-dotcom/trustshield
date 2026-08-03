@@ -1,0 +1,25 @@
+services:
+  trustshield:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: trustshield:latest
+    container_name: trustshield
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      # Keep database, encrypted uploads, exports and runtime model settings
+      # outside the image.  The named volume survives image/container updates.
+      CONTRACTGUARD_DATA_DIR: /data
+      # Frontend is served by this same container, so browser requests are
+      # same-origin.  Add an HTTPS/domain origin here only when placing a
+      # separate reverse proxy or frontend in front of it.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+    ports:
+      - "${TRUSTSHIELD_PORT:-8000}:8000"
+    volumes:
+      - trustshield-data:/data
+
+volumes:
+  trustshield-data:

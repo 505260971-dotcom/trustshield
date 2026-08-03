@@ -1,0 +1,23 @@
+# Version-control and local editor state
+.git/
+.workbuddy/
+.vscode/
+.idea/
+
+# Credentials and mutable application state are injected/mounted at runtime.
+.env
+**/.env
+backend/data/
+runtime/
+
+# Dependency/build caches are recreated in Docker build stages.
+**/node_modules/
+frontend/dist/
+**/__pycache__/
+**/*.py[cod]
+
+# Material not needed to build or run the web service.
+docs/
+演示PPT/
+演示PPT.zip
+.ppt_rubric.txt
