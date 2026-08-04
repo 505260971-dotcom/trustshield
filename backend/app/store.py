@@ -1482,6 +1482,32 @@ def get_case_center(case_id: str, actor: dict | None=None) -> dict | None:
         else:
             item['responsible_name'] = ROLE_DISPLAY.get(role, '系统')
         item['events'] = [dict(event) for event in c.execute('SELECT * FROM case_events WHERE case_id=? ORDER BY created_at DESC LIMIT 100', (case_id,))]
+        # 版本绑定状态：合同当时引用的是哪一版信审结果。历史审查依据始终
+        # 保留绑定版本快照；若该版本已不是客户当前生效版本，前端据此提前
+        # 提示“签约/导出前需要重新复审”，而不是等到导出接口才报错。
+        item['credit_binding'] = None
+        bound_id = str(item.get('credit_case_id') or '').strip()
+        if bound_id:
+            credit_row = c.execute('SELECT customer_key,version,status,conditions_json FROM credit_cases WHERE case_id=?', (bound_id,)).fetchone()
+            if credit_row:
+                try:
+                    conditions = json.loads(credit_row['conditions_json'] or '{}')
+                except Exception:
+                    conditions = {}
+                now = time.time()
+                current = c.execute("SELECT version FROM credit_cases WHERE customer_key=? AND status='approved' ORDER BY version DESC LIMIT 1", (credit_row['customer_key'],)).fetchone()
+                reasons: list[str] = []
+                if credit_row['status'] != 'approved':
+                    reasons.append('绑定的信用审核版本已不再生效')
+                elif not current or int(current['version']) != int(credit_row['version']):
+                    reasons.append(f'客户已产生新的信用审核版本 V{int(current["version"])}，本案件引用 V{int(credit_row["version"])} 已不是当前生效版本；历史审查依据保持不变，签约/导出前须基于新版本重新复审')
+                valid_from = float(conditions.get('valid_from') or 0)
+                valid_to = float(conditions.get('valid_to') or 0)
+                if valid_from > now:
+                    reasons.append('绑定的信用审核版本尚未到生效日期')
+                if valid_to and valid_to < now:
+                    reasons.append('绑定的信用审核版本已过有效期')
+                item['credit_binding'] = {'case_id': bound_id, 'version': int(credit_row['version']), 'stale': bool(reasons), 'reasons': reasons}
         return item
 
 def customer_headroom(customer_key: str, actor: dict, simulated_amount: float = 0) -> dict | None:

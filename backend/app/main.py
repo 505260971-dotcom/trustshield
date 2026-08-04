@@ -753,13 +753,15 @@ def _run(path: str, job_id: str, created_at: float):
             credit_snapshot={'case_id': job['credit_case']['case_id'],
                              'customer_name': job['credit_case'].get('customer_name') or '',
                              'version': job['credit_case'].get('version'),
+                             'business_type': job['credit_case'].get('business_type', '一般'),
                              'conditions': job['credit_case'].get('conditions') or {}},
         )
         credit_case = job['credit_case']
         exposure = store.latest_credit_exposure_snapshot(credit_case['case_id'])
         credit_risks = [
             *assess_customer_binding(report.get('contract_fields', {}), credit_case['customer_name']),
-            *assess_credit_compliance(report.get('clauses', []), credit_case['conditions'], (exposure or {}).get('payload')),
+            *assess_credit_compliance(report.get('clauses', []), credit_case['conditions'], (exposure or {}).get('payload'),
+                                      credit_case.get('business_type', '')),
         ]
         report['credit_decision'] = {
             'case_id': credit_case['case_id'], 'customer_name': credit_case['customer_name'],

@@ -169,6 +169,11 @@ def recommend_conditions(requested: dict[str, Any], facts: dict[str, Any], expos
     lane = normalized_business_type(business_type)
     requested_days = int(_number(requested.get('max_payment_days')) or 0)
     requested_prepay = max(0.0, _number(requested.get('min_prepayment_ratio')) or 0)
+    # TKM 三段式申请字段：首期款采购豁免、走模后尾款放账比例与信用期。
+    # 默认值与 normalize_conditions 一致，非 TKM 案件保持空值。
+    requested_exempt = bool(requested.get('first_payment_exempt', False))
+    requested_tail_ratio = max(0.0, _number(requested.get('tail_payment_ratio')) or 0)
+    requested_tail_days = int(_number(requested.get('tail_payment_days')) or 0)
     policy_exceptions: list[str] = []
     if lane == 'TKP':
         recommended_days = min(requested_days, 90)
@@ -180,23 +185,37 @@ def recommend_conditions(requested: dict[str, Any], facts: dict[str, Any], expos
         recommended_prepay = max(requested_prepay, 60.0)
         if requested_prepay < 60:
             policy_exceptions.append('TKM 模具交付前收款低于 60%，须按尾款放账比例或特别信用申请进行专项审批。')
+        # 精密模具业务走模后放账比例不超 40%；超出部分须专项审批。
+        recommended_tail_ratio = min(requested_tail_ratio, 40.0)
+        recommended_tail_days = min(requested_tail_days or 0, 365)
+        if requested_tail_ratio > 40:
+            policy_exceptions.append('TKM 走模后放账比例超过 40%，须专项审批。')
+        if requested_tail_days > 365:
+            policy_exceptions.append('TKM 走模后尾款信用期超过 365 天，须专项审批。')
     else:
         recommended_days = requested_days
         recommended_prepay = requested_prepay
 
     if requested_limit and current_exposure + requested_limit > recommended_limit and recommended_limit > 0:
         risk_flags.append({'code': 'EXPOSURE_CAP', 'level': 'mid', 'message': '现有应收与已入单额度占用叠加申请额度后，可能超过模型建议的信用额度。'})
+    recommendation: dict[str, Any] = {
+        'max_credit_amount': round(recommended_limit, 2),
+        'available_credit_amount': round(available_after_existing, 2),
+        'currency': requested_currency,
+        'max_payment_days': recommended_days, 'min_prepayment_ratio': round(recommended_prepay, 2),
+        'allowed_payment_methods': requested.get('allowed_payment_methods') or ['bank_transfer'],
+        'allow_vmi_jit': bool(requested.get('allow_vmi_jit', False)),
+        'exposure_at_assessment': round(current_exposure, 2),
+    }
+    if lane == 'TKM':
+        recommendation.update({
+            'first_payment_exempt': requested_exempt,
+            'tail_payment_ratio': round(recommended_tail_ratio, 2),
+            'tail_payment_days': recommended_tail_days,
+        })
     return {
         'business_type': lane, 'model_status': 'ready_for_reviewer' if can_recommend else 'needs_material_or_manual_review',
         'credit_grade': grade['grade'], 'scorecard': scorecard, 'risk_flags': risk_flags,
         'policy_exceptions': policy_exceptions,
-        'recommendation': {
-            'max_credit_amount': round(recommended_limit, 2),
-            'available_credit_amount': round(available_after_existing, 2),
-            'currency': requested_currency,
-            'max_payment_days': recommended_days, 'min_prepayment_ratio': round(recommended_prepay, 2),
-            'allowed_payment_methods': requested.get('allowed_payment_methods') or ['bank_transfer'],
-            'allow_vmi_jit': bool(requested.get('allow_vmi_jit', False)),
-            'exposure_at_assessment': round(current_exposure, 2),
-        },
+        'recommendation': recommendation,
     }

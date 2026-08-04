@@ -93,6 +93,31 @@ def main():
         raise AssertionError('旧信审版本不能在新版本生效后继续用于合同导出')
     except ValueError as exc:
         assert '尚未生效' in str(exc)
+    # 页面预检：案件详情应能提前看到“绑定版本已不是当前生效版本”，
+    # 而不是等到导出时才由后端报错。
+    case_center = store.get_case_center(contract['case_id'], admin)
+    binding = case_center['credit_binding']
+    assert binding is not None and binding['version'] == 1 and binding['stale'] is True
+    assert any('不再生效' in reason or 'V2' in reason for reason in binding['reasons'])
+
+    # TKM（模具制作）三段式字段与合规检查：走模后尾款放账比例/信用期独立
+    # 约束；首期款采购豁免时不再要求交付前最低收款比例；TKP 不启用这些字段。
+    from app.services.credit import normalize_conditions
+    tkm_conditions = normalize_conditions({**credit_v1['conditions'],
+                                           'first_payment_exempt': False, 'tail_payment_ratio': 40, 'tail_payment_days': 30})
+    assert tkm_conditions['tail_payment_ratio'] == 40 and tkm_conditions['tail_payment_days'] == 30
+    assert tkm_conditions['first_payment_exempt'] is False
+    tail_ratio = assess_credit_compliance([{'id': 'T1', 'text': '模具交付前支付60%，走模后支付尾款50%。'}], tkm_conditions, None, 'TKM')
+    assert {item['rule_id'] for item in tail_ratio} == {'CREDIT_TAIL_PAYMENT_RATIO'}
+    tail_term = assess_credit_compliance([{'id': 'T2', 'text': '走模后60天付清尾款。'}], tkm_conditions, None, 'TKM')
+    assert 'CREDIT_TAIL_PAYMENT_TERM' in {item['rule_id'] for item in tail_term}
+    tkm_exempt = dict(tkm_conditions); tkm_exempt['first_payment_exempt'] = True
+    exempt = assess_credit_compliance([{'id': 'T3', 'text': '双方约定交货后30天内付款。'}], tkm_exempt, None, 'TKM')
+    assert {item['rule_id'] for item in exempt} == set(), '首期款采购豁免后不应再要求交付前最低收款比例'
+    non_exempt = assess_credit_compliance([{'id': 'T5', 'text': '双方约定交货后30天内付款。'}], tkm_conditions, None, 'TKM')
+    assert 'CREDIT_PREPAYMENT' in {item['rule_id'] for item in non_exempt}
+    tkp_ignored = assess_credit_compliance([{'id': 'T4', 'text': '走模后支付尾款50%。'}], tkm_conditions, None, 'TKP')
+    assert 'CREDIT_TAIL_PAYMENT_RATIO' not in {item['rule_id'] for item in tkp_ignored}, 'TKP 不适用 TKM 尾款规则'
     print('OK: credit-first contract guard checks passed')
 
 

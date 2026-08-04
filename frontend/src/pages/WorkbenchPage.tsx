@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Badge, Button, Card, Empty, List, Segmented, Space, Spin, Tag, Typography, message } from 'antd'
+import { Alert, Badge, Button, Card, Empty, List, Segmented, Space, Spin, Tag, Typography, message } from 'antd'
 import { ArrowRightOutlined, CheckCircleOutlined, ClockCircleOutlined, FileAddOutlined, FolderOpenOutlined, SafetyCertificateOutlined, UnorderedListOutlined, WarningOutlined } from '@ant-design/icons'
 import { api } from '../services/api'
 import type { WorkboxItem } from '../types'
@@ -9,6 +9,11 @@ import { stageInfo, workItemAction } from '../components/workflow'
 
 const { Text, Title } = Typography
 type Bucket = 'todo' | 'in_progress' | 'draft' | 'done'
+// 审批决策与工作台的边界：需要 director/admin 作出决定的信用审核
+// （pending_director/pending_final）和合同（approval/final_approval）
+// 统一在审批中心处理；工作台只保留发起、推进、草稿与历史全景。
+const DECISION_STAGES = ['pending_director', 'pending_final', 'approval', 'final_approval']
+const isDecisionStage = (item: WorkboxItem) => DECISION_STAGES.includes(item.current_stage)
 type Props = {
   onCreateContract: () => void
   onCreateCredit: () => void
@@ -25,7 +30,7 @@ const bucketCopy: Record<Bucket, { label: string; empty: string }> = {
   draft: { label: '未提交草稿', empty: '没有未提交草稿。' },
   done: { label: '我的记录', empty: '暂无已办记录。' },
 }
-const roleTitle: Record<string, string> = { business: '我的业务', reviewer: '我的待办', director: '我的决策', admin: '我的决策' }
+const roleTitle: Record<string, string> = { business: '我的业务', reviewer: '我的待办', director: '我的工作台', admin: '我的工作台' }
 const stageLabel: Record<string, string> = {
   draft: '草稿', awaiting_credit: '等待有效信用审核', ai_review: '系统审查中', legal_review: '审核员复核', awaiting_business: '待业务补充材料', approval: '待主管审批', final_approval: '待最终审批', ready_to_sign: '可签约', archived: '已归档', returned_to_reviewer: '退回审核专员', returned_to_business: '待业务补充材料', pending_director: '待主管复核', pending_final: '待最终审批', approved: '已生效', rejected: '已拒绝', superseded: '历史版本',
 }
@@ -42,12 +47,12 @@ const roleGuidance: Record<string, { label: string; summary: string; steps: Arra
     steps: [['01', '先处理高优先级与退回事项',], ['02', '核验证据、风险和信用审核条件',], ['03', '明确建议后提交复核或退回补材料',]],
   },
   director: {
-    label: '财务审批主管', summary: '你负责比较申请条件、Agent 建议和审核意见，并决定批准、退回或提交最终审批。',
-    steps: [['01', '先看待决定事项和阻止放行的问题',], ['02', '比对申请条件与处理建议',], ['03', '明确决定及下一位处理人',]],
+    label: '财务审批主管', summary: '审批决策统一在审批中心处理；本工作台展示你正在推进的事项、草稿与历史记录。',
+    steps: [['01', '进入审批中心处理待决定事项',], ['02', '比较申请条件、Agent 建议与前序意见',], ['03', '明确批准、退回或提交最终审批',]],
   },
   admin: {
-    label: '最终审批人', summary: '你负责处理重大例外和最终商业边界，重点确认未解决风险、审批依据及批准后的影响。',
-    steps: [['01', '识别需要最终审批的例外和阻止放行的问题',], ['02', '查看前序意见和完整依据',], ['03', '作出批准、退回或拒绝决定',]],
+    label: '最终审批人', summary: '重大例外与最终边界在审批中心处理；本工作台保留推进中事项与已办记录。',
+    steps: [['01', '进入审批中心处理最终审批事项',], ['02', '查看前序意见和完整依据',], ['03', '作出批准、退回或拒绝决定',]],
   },
 }
 
@@ -58,6 +63,7 @@ function actionLabel(item: WorkboxItem) {
 export default function WorkbenchPage({ onCreateContract, onCreateCredit, onOpenCase, onOpenCredit, onNavigate, canCreateContract, canCreateCredit }: Props) {
   const { user } = useAuth()
   const role = user?.role || 'business'
+  const decisionRole = role === 'director' || role === 'admin'
   const [items, setItems] = useState<Record<Bucket, WorkboxItem[]>>({ todo: [], in_progress: [], draft: [], done: [] })
   const [bucket, setBucket] = useState<Bucket>('todo')
   const [loading, setLoading] = useState(true)
@@ -71,7 +77,13 @@ export default function WorkbenchPage({ onCreateContract, onCreateCredit, onOpen
   }
   useEffect(() => { load() }, [])
 
-  const todo = useMemo(() => [...items.todo].sort((a, b) => priorityWeight(a.priority) - priorityWeight(b.priority) || Number(a.due_at || Infinity) - Number(b.due_at || Infinity)), [items.todo])
+  // 审批决策（信用审核/合同放行）只在审批中心处理：工作台为 director/admin
+  // 过滤掉决策阶段事项，并给出进入审批中心的提示，避免两处重复出现同一批待办。
+  const decisionCount = decisionRole ? items.todo.filter(isDecisionStage).length : 0
+  const todo = useMemo(() => {
+    const source = decisionRole ? items.todo.filter(item => !isDecisionStage(item)) : items.todo
+    return [...source].sort((a, b) => priorityWeight(a.priority) - priorityWeight(b.priority) || Number(a.due_at || Infinity) - Number(b.due_at || Infinity))
+  }, [items.todo, decisionRole])
   const highCount = todo.filter(item => ['urgent', 'high'].includes(item.priority)).length
   const dueSoon = todo.filter(item => item.due_at && item.due_at * 1000 < Date.now() + 48 * 3600 * 1000).length
   const returned = todo.filter(item => ['returned_to_business', 'returned_to_reviewer', 'awaiting_business'].includes(item.current_stage)).length
@@ -99,6 +111,11 @@ export default function WorkbenchPage({ onCreateContract, onCreateCredit, onOpen
       <div className="action-metric"><span><SafetyCertificateOutlined /></span><div><small>被退回 / 待补充材料</small><strong>{returned}</strong></div></div>
     </section>
 
+    {decisionRole && decisionCount > 0 && <Alert className="action-approval-handoff" type="warning" showIcon style={{ marginBottom: 16 }}
+      message={`有 ${decisionCount} 项信用审核 / 合同事项需要你作出决定`}
+      description="审批决策统一在审批中心处理，工作台不再重复展示。查看依据、批准、退回或提交上级审批请进入审批中心。"
+      action={<Button size="small" type="primary" onClick={() => onNavigate('/approvals')}>进入审批中心</Button>} />}
+
     <section className="action-role-guide" aria-label="当前角色处理指引">
       <div className="action-role-guide-head"><span className="section-kicker">处理指引</span><Text strong>本角色的处理路径</Text><Text type="secondary">先解决当前问题，再把事项交给正确的下一位处理人。</Text></div>
       <div className="action-role-guide-steps">{guidance.steps.map(([number, copy]) => <div className="action-role-guide-step" key={number}><span>{number}</span><Text>{copy}</Text></div>)}</div>
@@ -108,11 +125,11 @@ export default function WorkbenchPage({ onCreateContract, onCreateCredit, onOpen
       <div className="focus-action-content"><div className="focus-action-main"><div className="focus-action-title"><Text strong>{focus.customer_name}</Text><Tag color={focus.priority === 'urgent' ? 'red' : focus.priority === 'high' ? 'orange' : 'default'}>{priorityLabel[focus.priority] || '普通'}</Tag><Tag>{stageLabel[focus.current_stage] || focus.current_stage}</Tag></div><Title level={4}>{focus.title}</Title>{focus.detail && <Text>{focus.detail}</Text>}<div className="focus-action-handoff"><span>责任：{focus.responsible_name === '我' ? '我' : `${roleLabel[focus.responsible_role] || focus.responsible_role} · ${focus.responsible_name}`}</span>{focus.action_hint && <span>下一步：{focus.action_hint}</span>}{focus.due_at && <span>截止：{fmtTime(focus.due_at)}</span>}</div></div><Button type="primary" size="large" icon={<ArrowRightOutlined />} onClick={() => open(focus)}>{actionLabel(focus)}</Button></div>
     </Card>}
     {!focus && bucket === 'todo' && <Card className="focus-action-card focus-empty-card" title={<Space><CheckCircleOutlined /><span>当前没有待办，接下来可以做什么？</span></Space>}>
-      <div className="focus-empty-content"><div><Title level={4}>目前没有待办事项</Title><Text type="secondary">你可以从客户工作台继续推进业务，或查看历史记录和流程结果。</Text></div><Space wrap>{createButtons()}<Button icon={<FolderOpenOutlined />} onClick={() => onNavigate('/customers')}>查看客户工作台</Button></Space></div>
+      <div className="focus-empty-content"><div><Title level={4}>目前没有待办事项</Title><Text type="secondary">{decisionRole?'审批决策统一在审批中心处理：可查看客户工作台全景，或进入审批中心确认待决事项。':'你可以从客户工作台继续推进业务，或查看历史记录和流程结果。'}</Text></div><Space wrap>{createButtons()}<Button icon={<FolderOpenOutlined />} onClick={() => onNavigate('/customers')}>查看客户工作台</Button></Space></div>
     </Card>}
 
     <Card className="action-list-card" title="事项列表" extra={<Button type="text" onClick={load}>刷新</Button>}>
-      <Segmented className="action-bucket-tabs" value={bucket} onChange={value => setBucket(value as Bucket)} options={(['todo', 'in_progress', 'draft', 'done'] as Bucket[]).map(value => ({ value, label: `${bucketCopy[value].label} (${items[value].length})` }))} />
+      <Segmented className="action-bucket-tabs" value={bucket} onChange={value => setBucket(value as Bucket)} options={(['todo', 'in_progress', 'draft', 'done'] as Bucket[]).map(value => ({ value, label: `${bucketCopy[value].label} (${value === 'todo' ? todo.length : items[value].length})` }))} />
       {loading ? <div className="page-loading"><Spin /></div> : selected.length ? <List className="action-list" dataSource={selected} renderItem={item => { const meta = stageInfo(item.current_stage); return <List.Item actions={[<Button key="open" type={bucket === 'todo' ? 'primary' : 'link'} onClick={() => open(item)}>{bucket === 'todo' ? actionLabel(item) : '查看详情'}{bucket === 'todo' && <ArrowRightOutlined />}</Button>]}><List.Item.Meta avatar={<span className={`action-kind action-kind-${item.source_type}`}>{item.source_type === 'credit' ? <SafetyCertificateOutlined /> : <FolderOpenOutlined />}</span>} title={<Space wrap><Text strong>{item.customer_name}</Text><Tag color={item.source_type === 'credit' ? 'cyan' : 'blue'}>{item.kind_label}</Tag><Tag color={meta.color}>{meta.label}</Tag></Space>} description={<div className="action-list-copy"><Text strong>{item.title}</Text>{item.detail && <Text>{item.detail}</Text>}{item.action_hint && <Text className="action-list-next">下一步：{item.action_hint}</Text>}<Text type="secondary">责任：{item.responsible_name === '我' ? '我' : `${roleLabel[item.responsible_role] || item.responsible_role} · ${item.responsible_name}`}{item.due_at ? ` · 截止 ${fmtTime(item.due_at)}` : ''}</Text></div>} /></List.Item> }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<Space direction="vertical"><Text>{bucketCopy[bucket].empty}</Text>{bucket === 'todo' && <Space>{canCreateCredit && <Button type="primary" onClick={onCreateCredit}>发起客户信用审核</Button>}{canCreateContract && <Button onClick={onCreateContract}>发起合同审查</Button>}</Space>}</Space>} />}
     </Card>
   </div>

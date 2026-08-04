@@ -100,6 +100,8 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
         amount_risk = next((risk for risk in risks if risk.get('rule_id') == 'CREDIT_EXPOSURE'), {})
         term_risk = next((risk for risk in risks if risk.get('rule_id') == 'CREDIT_TERM'), {})
         prepay_risk = next((risk for risk in risks if risk.get('rule_id') == 'CREDIT_PREPAYMENT'), {})
+        tail_ratio_risk = next((risk for risk in risks if risk.get('rule_id') == 'CREDIT_TAIL_PAYMENT_RATIO'), {})
+        tail_term_risk = next((risk for risk in risks if risk.get('rule_id') == 'CREDIT_TAIL_PAYMENT_TERM'), {})
         payment_risk = next((risk for risk in risks if risk.get('rule_id') == 'CREDIT_PAYMENT_METHOD'), {})
         delivery_risk = next((risk for risk in risks if risk.get('rule_id') == 'CREDIT_DELIVERY_MODE'), {})
 
@@ -155,6 +157,33 @@ def calculate_signability(report: dict[str, Any], findings: list[dict[str, Any]]
                 action=f'将交付前收款提高至至少 {min_prepay:g}%。' if min_prepay is not None else '先确认已生效信用审核条件中的最低收款比例。',
                 can_resolve_in_contract=min_prepay is not None, requires_credit_reapproval=min_prepay is None,
                 clause_id=prepay_risk.get('clause_id', ''), source_ref=prepay_risk.get('source_ref', ''),
+            ))
+
+        # TKM 制度三段式：走模后尾款放账比例与信用期是独立约束，不与通用
+        # 账期/收款比例混用；未配置上限时只能通过更新信用审核条件解决。
+        tail_ratio_facts = tail_ratio_risk.get('facts') or {}
+        tail_ratio = _number(tail_ratio_facts.get('tail_payment_ratio'))
+        tail_ratio_limit = _number(conditions.get('tail_payment_ratio'))
+        if tail_ratio_risk:
+            items.append(_item(
+                item_id='credit-tail-ratio', category='credit', rule_id='CREDIT_TAIL_PAYMENT_RATIO', title='走模后尾款放账比例',
+                current=f'{tail_ratio:g}%' if tail_ratio is not None else '合同约定走模后放账',
+                target=f'≤ {tail_ratio_limit:g}%' if tail_ratio_limit is not None else '补充已生效 TKM 尾款放账比例',
+                action=f'将走模后尾款放账比例调整为不超过 {tail_ratio_limit:g}%。' if tail_ratio_limit is not None else '先更新 TKM 信用审核条件中的走模后尾款放账比例。',
+                can_resolve_in_contract=tail_ratio_limit is not None, requires_credit_reapproval=tail_ratio_limit is None,
+                clause_id=tail_ratio_risk.get('clause_id', ''), source_ref=tail_ratio_risk.get('source_ref', ''),
+            ))
+        tail_term_facts = tail_term_risk.get('facts') or {}
+        tail_days = _number(tail_term_facts.get('tail_payment_days'))
+        tail_days_limit = _number(conditions.get('tail_payment_days'))
+        if tail_term_risk:
+            items.append(_item(
+                item_id='credit-tail-term', category='credit', rule_id='CREDIT_TAIL_PAYMENT_TERM', title='走模后尾款信用期',
+                current=f'{tail_days:g} 天' if tail_days is not None else '合同约定走模后尾款账期',
+                target=f'≤ {tail_days_limit:g} 天' if tail_days_limit is not None else '补充已生效 TKM 尾款信用期',
+                action=f'将走模后尾款信用期调整为不超过 {tail_days_limit:g} 天。' if tail_days_limit is not None else '先更新 TKM 信用审核条件中的走模后尾款信用期。',
+                can_resolve_in_contract=tail_days_limit is not None, requires_credit_reapproval=tail_days_limit is None,
+                clause_id=tail_term_risk.get('clause_id', ''), source_ref=tail_term_risk.get('source_ref', ''),
             ))
 
         if payment_risk:

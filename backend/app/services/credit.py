@@ -18,6 +18,12 @@ _TERM_PATTERNS = (
 _PREPAY = re.compile(r'(?:预付|预付款|定金|发货前|交付前|before\s+(?:delivery|shipment))[^。；;]{0,60}?(\d{1,3})\s*[%％]', re.I)
 _PREPAY_REVERSED = re.compile(r'(\d{1,3})\s*[%％][^。；;]{0,60}?(?:预付|预付款|定金|发货前|交付前|before\s+(?:delivery|shipment))', re.I)
 _ACCEPTANCE = re.compile(r'(?:银行承兑|商业承兑|bank\s+acceptance|acceptance\s+bill)', re.I)
+# TKM（模具制作）制度字段：走模/试模/模具验收后的尾期放账比例与信用期。
+# 与通用账期正则不同，这两条必须锚定模具语境，避免把普通货款的
+# “验收后 N 天付款”误判为模具尾款。
+_TAIL_TERM = re.compile(r'(?:走模|试模|模具(?:交付|验收)|模试|mold\s+trial|mold\s+run|mold\s+acceptance|acceptance\s+of\s+mold)[^。；;]{0,80}?(?:后|起|within|after)?\s*(\d{1,4})\s*(?:个?工作)?(?:天|日|days?)', re.I)
+_TAIL_RATIO = re.compile(r'(?:走模|试模|模具(?:交付|验收)|模试|mold\s+trial|mold\s+run|mold\s+acceptance)[^。；;]{0,60}?(?:后|起|after)?[^。；;]{0,50}?(\d{1,3})\s*[%％]', re.I)
+_TAIL_RATIO_REVERSED = re.compile(r'(\d{1,3})\s*[%％][^。；;]{0,60}?(?:走模|试模|模具(?:交付|验收)|模试|mold\s+trial|mold\s+run|mold\s+acceptance)', re.I)
 # Chinese text immediately following an English acronym is also a word character
 # to Python's regex engine, so \bVMI\b would miss forms such as “VMI模式”.
 _VMI_JIT = re.compile(r'(?:VMI|JIT|vendor\s*managed\s*inventory|just[ -]?in[ -]?time)|供应商管理库存|准时制', re.I)
@@ -42,16 +48,26 @@ def positive_vmi_jit_match(text: str):
 
 
 def normalize_conditions(value: dict[str, Any]) -> dict[str, Any]:
-    """Validate and normalize the commercial conditions stored with a decision."""
+    """Validate and normalize the commercial conditions stored with a decision.
+
+    TKP（注塑组件制造）使用通用字段：信用额、账期、最低收款比例、付款方式。
+    TKM（模具制作）按东江制度为三段式申请，另有三个字段：首期款采购豁免、
+    走模后尾款放账比例、走模后尾款信用期。非 TKM 案件三者归一化为默认值，
+    保持跨类型条件比较的确定性。
+    """
     raw = value or {}
     try:
         max_credit_amount = float(raw.get('max_credit_amount') or 0)
         max_payment_days = int(raw.get('max_payment_days') or 0)
         min_prepayment_ratio = float(raw.get('min_prepayment_ratio') or 0)
+        tail_payment_ratio = float(raw.get('tail_payment_ratio') or 0)
+        tail_payment_days = int(raw.get('tail_payment_days') or 0)
     except (TypeError, ValueError) as exc:
         raise ValueError('授信金额、最长账期和最低预付款比例必须为数字') from exc
     if max_credit_amount < 0 or max_payment_days < 0 or not 0 <= min_prepayment_ratio <= 100:
         raise ValueError('信用审核条件范围无效')
+    if not 0 <= tail_payment_ratio <= 100 or tail_payment_days < 0:
+        raise ValueError('TKM 走模后尾款放账比例与信用期范围无效')
     methods = raw.get('allowed_payment_methods') or ['bank_transfer']
     if not isinstance(methods, list) or not all(isinstance(x, str) and x.strip() for x in methods):
         raise ValueError('允许付款方式必须为非空文本数组')
@@ -64,6 +80,12 @@ def normalize_conditions(value: dict[str, Any]) -> dict[str, Any]:
         'allow_vmi_jit': bool(raw.get('allow_vmi_jit', False)),
         'valid_from': float(raw.get('valid_from') or 0),
         'valid_to': float(raw.get('valid_to') or 0),
+        # TKM 三段式申请字段（东江客户信用管理制度）：
+        # 1) 首期款采购豁免：豁免后允许客户在未收回首期款时即开始项目物料采购；
+        # 2) 走模后尾款放账比例上限；3) 走模后尾款信用期（天）。
+        'first_payment_exempt': bool(raw.get('first_payment_exempt', False)),
+        'tail_payment_ratio': tail_payment_ratio,
+        'tail_payment_days': tail_payment_days,
     }
 
 
@@ -99,16 +121,21 @@ def assess_customer_binding(contract_fields: dict[str, Any], customer_name: str)
     return []
 
 
-def assess_credit_compliance(clauses: list[dict], conditions: dict[str, Any], exposure_snapshot: dict[str, Any] | None=None) -> list[dict]:
+def assess_credit_compliance(clauses: list[dict], conditions: dict[str, Any], exposure_snapshot: dict[str, Any] | None=None, business_type: str='') -> list[dict]:
     """Return non-overridable findings when contract terms are worse than credit terms.
 
     ``exposure_snapshot`` is an encrypted-at-rest CRM/ERP point-in-time input
     supplied by the credit module.  It lets the contract guard enforce the
     documented total-credit rule instead of comparing only this one contract's
     face value with the approved cap.
+
+    ``business_type`` selects the TKM tail-payment rules: TKM（模具制作）按制度
+    走模后尾款放账比例与信用期单独约束，且“首期款采购豁免”时不再要求交付前
+    最低收款比例。TKP/一般案件不启用这些字段，保持两类型字段分离。
     """
     text = '\n'.join(str(item.get('text') or '') for item in clauses or [])
     findings: list[dict] = []
+    lane = 'TKM' if str(business_type or '').strip().upper() in {'TKM', '模具制作'} else ''
     term_days = [int(match.group(1)) for pattern in _TERM_PATTERNS for match in pattern.finditer(text)]
     maximum = conditions.get('max_payment_days', 0)
     # 0 means cash/no post-delivery credit, not “unlimited”.
@@ -119,11 +146,32 @@ def assess_credit_compliance(clauses: list[dict], conditions: dict[str, Any], ex
 
     required_prepay = conditions.get('min_prepayment_ratio', 0)
     prepay = [int(m.group(1)) for m in _PREPAY.finditer(text)] + [int(m.group(1)) for m in _PREPAY_REVERSED.finditer(text)]
-    if required_prepay and (not prepay or max(prepay) < required_prepay):
+    if lane == 'TKM' and conditions.get('first_payment_exempt'):
+        # 制度允许“首期款采购豁免”：客户不收回首期款即可采购项目物料，
+        # 因此交付前最低收款比例检查整体豁免，避免与豁免权自相矛盾。
+        pass
+    elif required_prepay and (not prepay or max(prepay) < required_prepay):
         actual = max(prepay, default=0)
         evidence = f'合同中识别的交付前收款比例 {actual:g}%' if prepay else '未识别到合同约定的交付前收款比例'
         findings.append(_risk('CREDIT_PREPAYMENT', f'该客户信用审核要求交付前最低收款 {required_prepay:g}%', evidence,
                               f'合同交付前收款 {actual:g}% < 已生效信用审核下限 {required_prepay:g}%', {'prepayment_ratio': actual, 'min_prepayment_ratio': required_prepay}))
+
+    # TKM 制度三段式：走模后尾款放账比例与信用期单独受批核条件约束，
+    # 不混入通用账期/收款比例字段（TKP 无此字段）。
+    if lane == 'TKM':
+        tail_ratio_limit = float(conditions.get('tail_payment_ratio') or 0)
+        tail_ratios = [int(m.group(1)) for m in _TAIL_RATIO.finditer(text)] + [int(m.group(1)) for m in _TAIL_RATIO_REVERSED.finditer(text)]
+        if tail_ratios and max(tail_ratios) > tail_ratio_limit:
+            actual = max(tail_ratios)
+            evidence = f'合同走模后尾款比例 {actual:g}%' if tail_ratio_limit > 0 else f'合同约定走模后放账 {actual:g}%'
+            findings.append(_risk('CREDIT_TAIL_PAYMENT_RATIO', f'该客户 TKM 信用审核允许走模后放账比例不超过 {tail_ratio_limit:g}%', evidence,
+                                  f'合同走模后放账 {actual:g}% > 已生效信用审核上限 {tail_ratio_limit:g}%', {'tail_payment_ratio': actual, 'tail_payment_ratio_limit': tail_ratio_limit}))
+        tail_days_limit = int(conditions.get('tail_payment_days') or 0)
+        tail_days = [int(m.group(1)) for m in _TAIL_TERM.finditer(text)]
+        if tail_days and max(tail_days) > tail_days_limit:
+            actual = max(tail_days)
+            findings.append(_risk('CREDIT_TAIL_PAYMENT_TERM', f'该客户 TKM 信用审核允许走模后尾款信用期为 {tail_days_limit} 天', f'合同走模后尾款信用期 {actual} 天',
+                                  f'合同走模后尾款信用期 {actual} 天 > 已生效信用审核上限 {tail_days_limit} 天', {'tail_payment_days': actual, 'tail_payment_days_limit': tail_days_limit}))
 
     methods = set(conditions.get('allowed_payment_methods') or [])
     if _ACCEPTANCE.search(text) and 'acceptance_bill' not in methods:
