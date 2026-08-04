@@ -189,6 +189,7 @@ def _system_prompt() -> str:
   identity: claim_id, entity_name, evidence_id, evidence_quote。
   financial_context: claim_id, entity_name, period, scope(consolidated|standalone), currency(CNY|HKD|USD), source_unit(base|thousand|ten_thousand|million|billion), evidence_id, evidence_quote；如同页页眉将字段拆开，可改为 evidence_refs:[{evidence_id,evidence_quote}, ...]。
   financial_metric: claim_id, metric(revenue|current_assets|current_liabilities|total_assets|total_liabilities|net_profit|operating_cashflow), value(材料原始数值), context_id, evidence_id, evidence_quote。
+  材料中的金额与数值可能已显示为 <MASK-...> 或 <MASK-LLM-N> 占位符（本地隐私脱敏）。提交 financial_metric 时，value 可直接使用材料中看到的占位符，系统会在本地通过脱敏映射还原原始数值并与来源核对；不要因为数值被脱敏就判定材料缺失或请求补件。evidence_quote 仍须引用脱敏文本中的原文片段。
   observation: claim_id, category, summary, evidence_id, evidence_quote。
   不具备原始来源、主体、期间、单位或数值的内容不得提交为财务Claim。
   evidence_id 必须使用工具返回的 chunk_id（或同一来源的 source_ref）。financial_context 可以使用一条完整引文，或最多四条 evidence_refs；每条引文均须原样存在于其来源块，且这些来源必须属于同一文档、同一页。证据合起来必须证明主体、期间、合并/单体口径、币种和单位；不得跨页、跨文档拼接。
