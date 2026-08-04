@@ -46,11 +46,9 @@ def _audit(status='ready_for_policy'):
 
 
 def main():
-    original = (graph.run_react_credit_audit, graph._records_for_document,
-                graph._extract_from_document, graph.configured_llm)
+    original = (graph.run_react_credit_audit, graph._records_for_document, graph.configured_llm)
     try:
         graph._records_for_document = lambda _document: []
-        graph._extract_from_document = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('legacy extraction must not run in production'))
         graph.configured_llm = lambda: False
         document = {'document_id': 'D1', 'document_type': 'financial_report', 'original_name': 'actual-format.pdf'}
         exposure = {'current_receivables': 100_000, 'booked_order_amount': 200_000, 'overdue_amount': 0,
@@ -71,8 +69,7 @@ def main():
         assert failed_report['assessment']['recommendation']['max_credit_amount'] == 0
         assert failed_report['assessment']['risk_flags'][0]['code'] == 'AGENT_EXECUTION_FAILED'
     finally:
-        (graph.run_react_credit_audit, graph._records_for_document,
-         graph._extract_from_document, graph.configured_llm) = original
+        (graph.run_react_credit_audit, graph._records_for_document, graph.configured_llm) = original
     print('production graph consumes only ReAct Claims and fails closed')
 
 

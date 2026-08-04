@@ -1,4 +1,4 @@
-import os, json, concurrent.futures, re, difflib
+import os, json, re, difflib
 from typing import TypedDict, List, Dict, Any, Annotated
 from langgraph.graph import StateGraph, START, END
 
@@ -9,7 +9,8 @@ from ..services.parse import parse_contract
 from ..services.mask import mask_clauses
 from ..services.smart_mask import mask_clauses_smart, restore_report, restore_text
 from ..services.numerics import extract_numerics
-from ..services.deterministic_rules import applicable_rule_ids, assess_clause
+from ..services.deterministic_rules import assess_clause
+from ..services.contract_react_agent import run_contract_react_audit
 from langchain_core.messages import HumanMessage, SystemMessage
 
 GLOBAL_DIMS = [r['dim'] for r in RULES]
@@ -24,14 +25,16 @@ class State(TypedDict, total=False):
     path: str; filename: str
     business_type_hint: str
     clauses: List[Dict[str, Any]]; masked_clauses: List[Dict[str, Any]]; mapping: Dict[str, str]
-    contract_fields: Dict[str, Any]; rule_hits: Dict[str, List[str]]
+    contract_fields: Dict[str, Any]
     rules: List[Dict[str, Any]]; rules_by_id: Dict[str, Dict[str, Any]]; rule2dim: Dict[str, str]; dim2rule: Dict[str, str]
     parent_report: Dict[str, Any]; review_clause_ids: set[str]; review_scope: Dict[str, Any]
     infer: List[Dict[str, Any]]; risks: List[Dict[str, Any]]; review_hints: List[Dict[str, Any]]; summary: Dict[str, Any]
+    credit_snapshot: Dict[str, Any]
+    agent_audit: Dict[str, Any]; boundary_checks: List[Dict[str, Any]]; agent_observations: List[Dict[str, Any]]
+    semantic_llm_attempts: int; semantic_llm_successes: int
     # Nodes mutate and return the complete sequential state. A reducer here
     # would concatenate every historical step list again on every node.
     steps: List[str]
-    semantic_llm_attempts: int; semantic_llm_successes: int
 
 def node_ingest(state):
     r = parse_contract(state['path'])
@@ -157,179 +160,100 @@ def node_extract_fields(state):
     state['steps'].append(f'合同信息提取：我方={f.get("our_party")} 业务={f.get("business_type")} 有效期={f.get("validity_years")}')
     return state
 
-def node_retrieve(state):
-    hits = {}
-    business_type = state.get('contract_fields', {}).get('business_type', '一般')
-    rules_by_id = state.get('rules_by_id', RULE_BY_ID)
-    for c in state['masked_clauses']:
-        if c['id'] not in state.get('review_clause_ids', set()):
-            hits[c['id']] = []
-            continue
-        t = c.get('text_masked') or c.get('text')
-        if not t or len(t) < 12:
-            hits[c['id']] = []; continue
-        local_ids = applicable_rule_ids(c.get('text') or t, business_type)
-        # No candidate means no relevant legal topic — skip LLM for headings/boilerplate.
-        if not local_ids:
-            hits[c['id']] = []
-            continue
-        applicable = [rule_id for rule_id in local_ids if rule_id in rules_by_id and ('全部' in rules_by_id[rule_id].get('applies_to', ['全部']) or business_type in rules_by_id[rule_id].get('applies_to', ['全部']))]
-        hits[c['id']] = applicable
-    state['rule_hits'] = hits
-    state['steps'].append(
-        f'规则候选筛选：候选条款 {sum(1 for x in hits.values() if x)} / {len(hits)}，'
-        f'已按业务类型过滤无关底限；不依赖向量检索'
-    )
-    return state
 
-def _robust_json(text):
-    if not text:
-        return {}
-    s = text.strip()
-    try: return json.loads(s)
-    except Exception: pass
-    m = re.search(r'\{.*\}', s, re.S)
-    if m:
-        try: return json.loads(m.group(0))
-        except Exception: pass
-    return {}
-
-def judge_one(llm, c, rule_ids, business_type, our_party, rules_by_id, rule2dim):
-    requested_dims = list(dict.fromkeys(rule2dim.get(r) for r in rule_ids if r in rule2dim))
-    txt_masked = c.get('text_masked') or c.get('text') or ''
-    if not requested_dims:
-        return {'clause_id': c['id'], 'page': c['start_page'], 'source_ref': c.get('source_ref', ''), 'requested': [], 'flags': {},
-                'uncertain': {}, 'facts_by_dim': {}, 'evidence_map': {}, 'suggestion': '', 'skipped': True}
-    rule_ctx = '\n'.join(f"- {rules_by_id[r]['id']} {rules_by_id[r]['baseline']}（{rules_by_id[r]['check']}）" for r in rule_ids if r in rules_by_id)
-    dims_str = ', '.join(requested_dims)
-    sys = ('你是销售合同条款语义与事实抽取子Agent。我方立场=' + str(our_party) + '（东江集团，供方/制造方）。'
-           '请理解条款的主体、义务、时间触发点、条件、否定、例外和审批，不允许按关键词机械判断。'
-           '仅输出JSON：'
-           '{"assessments":{<维度名>:{"status":"risk|clear|uncertain","evidence":"原文片段<=80字",'
-           '"reason":"简短判断依据","confidence":0到1,"facts":{'
-           '"term_days":number_or_null,"payment_trigger":"delivery|acceptance|invoice|other|unknown",'
-           '"delivery_payment_ratio":number_or_null,"validity_years":number_or_null,'
-           '"penalty_ratio":number_or_null,"has_fixed_contract_amount":true|false|null,'
-           '"undertakes_indirect_loss":true|false|null,"approval_role":"集团财务总监|财务审批主管|none|unknown"}}},'
-           '"suggestion":"<=120字修改建议"}。'
-           '只返回 status 为 risk 或 uncertain 的维度；明确不适用的维度可以省略。无法确定时用 uncertain，禁止猜测。')
-    user = (f'业务类型:{business_type}\n我方:{our_party}\n相关底限条款:\n{rule_ctx}\n'
-            f'需评估维度: {dims_str}\n\n条款#{c["id"]} (页{c["start_page"]}) 脱敏后文本:\n{txt_masked[:1800]}')
-    data = {}; model_attempted = False; model_succeeded = False
-    for attempt in range(1):
-        try:
-            model_attempted = True
-            r = invoke_remote(llm, [SystemMessage(content=sys), HumanMessage(content=user)], completion_tokens=1500)
-            data = _robust_json(r.content)
-            assessments = data.get('assessments') or data.get('flags')
-            if isinstance(assessments, dict) and assessments:
-                model_succeeded = True
-                break
-        except Exception as e:
-            data = {'_error': str(e)}
-    # 归一化
-    assessments = data.get('assessments', data.get('flags', {})) if isinstance(data, dict) else {}
-    flags = {}; uncertain = {}; evidence_map = {}; facts_by_dim = {}
-    for d in requested_dims:
-        v = assessments.get(d) if isinstance(assessments, dict) else None
-        if isinstance(v, dict):
-            status = v.get('status')
-            flags[d] = status == 'risk' or (status is None and bool(v.get('hit', False)))
-            uncertain[d] = status == 'uncertain'
-            if v.get('evidence'): evidence_map[d] = v.get('evidence')
-            facts_by_dim[d] = v.get('facts') or {}
+def _claims_to_infer(claims, mapping):
+    """Agent-verified risk claims -> enforce's per-clause infer structure."""
+    infer: Dict[str, Dict[str, Any]] = {}
+    for claim in claims or []:
+        cid = str(claim.get('clause_id') or '')
+        if claim.get('type') != 'clause_risk' or not cid:
+            continue
+        inf = infer.setdefault(cid, {'clause_id': cid, 'page': claim.get('page'), 'source_ref': claim.get('source_ref', ''),
+                                     'requested': [], 'flags': {}, 'uncertain': {}, 'evidence_map': {}, 'facts_by_dim': {},
+                                     'suggestion': '', 'rule_ids': [], 'skipped': False,
+                                     'model_attempted': True, 'model_succeeded': True})
+        dim = str(claim.get('dim') or '')
+        rule_id = str(claim.get('rule_id') or '')
+        inf['rule_ids'].append(rule_id)
+        if claim.get('status') == 'risk':
+            inf['flags'][dim] = True
         else:
-            flags[d] = bool(v)
-            uncertain[d] = False
-    suggestion = data.get('suggestion', '')
-    inf = {'clause_id': c['id'], 'page': c['start_page'], 'source_ref': c.get('source_ref', ''), 'requested': requested_dims,
-           'flags': flags, 'uncertain': uncertain, 'evidence_map': evidence_map,
-           'facts_by_dim': facts_by_dim, 'suggestion': suggestion, 'rule_ids': list(rule_ids),
-           'model_attempted': model_attempted, 'model_succeeded': model_succeeded}
-    return inf
+            inf['uncertain'][dim] = True
+        inf['evidence_map'][dim] = restore_text(str(claim.get('evidence_quote') or ''), mapping)
+        inf['facts_by_dim'][dim] = claim.get('facts') or {}
+    return infer
 
-# Deterministic rules inspect every clause. Semantic LLM review is bounded for
-# interactive latency; the window scales with contract size and prioritises high
-# severity candidates first.
-def _max_analyze(n_clauses: int) -> int:
-    return min(32, max(16, (n_clauses or 0) // 3 or 16))
 
-HIGH_RULES = {'R01', 'R02', 'R04', 'R10', 'R12', 'R16'}
+def node_react_audit(state):
+    """RAG + ReAct clause audit; deterministic local rules still cover every clause.
 
-def node_judge(state):
-    # A deterministic review must remain usable for the credit-to-contract
-    # control path even when a remote semantic model is intentionally absent.
-    # In that mode local rules still produce their auditable findings; the
-    # report clearly records that semantic interpretation was skipped.
-    try:
-        llm = get_llm(json_mode=True, max_tokens=1500, temperature=0, timeout=60, max_retries=0)
-    except Exception:
-        llm = None
+    The Agent searches and reads masked clauses, inspects the rule catalog and
+    the customer's approved credit boundary, and submits source-bound Claims.
+    If the Agent is unavailable it fails closed; the deterministic local rules
+    below still produce their auditable findings for every clause.
+    """
+    clauses = state.get('masked_clauses') or []
     business_type = state.get('contract_fields', {}).get('business_type', '未知')
     our_party = state.get('contract_fields', {}).get('our_party', '乙方')
-    clauses = state['masked_clauses']; hits = state['rule_hits']
-    rules_by_id = state.get('rules_by_id', RULE_BY_ID); rule2dim = state.get('rule2dim', RULE2DIM)
-    keywords=['违约','赔偿','连带','排他','VMI','JIT','质保','知识产权','取消','提价','承兑','付款','账期','有效期','交货','法律','诉讼','不可','独家','订单','库存','价格']
-    def orderby(i):
-        c=clauses[i]; h=hits.get(c['id'],[])
-        high_hits = sum(1 for rid in h if rid in HIGH_RULES)
-        kw=sum(1 for k in keywords if k in (c.get('text') or '').lower()) if hasattr(c,'get') else 0
-        return (-high_hits, -len(h), -kw)
-    idxs=sorted(range(len(clauses)), key=orderby)
-    idxs = [i for i in idxs if hits.get(clauses[i]['id'])]
-    analyze_cap = _max_analyze(len(clauses))
-    if len(idxs) > analyze_cap:
-        idxs = idxs[:analyze_cap]
-    results = [None] * len(clauses)
-    def attach_local(result, clause):
+    rules_by_id = state.get('rules_by_id', RULE_BY_ID)
+    mapping = state.get('mapping') or {}
+    approval_history = [{'severity': item.get('severity'), 'rule_id': item.get('rule_id'),
+                         'summary': str(item.get('suggestion') or '')[:300], 'action_status': item.get('action_status') or 'prior'}
+                        for item in (state.get('parent_report') or {}).get('risks') or []][:12]
+    agent: Dict[str, Any] = {'status': 'skipped', 'claims': [], 'trace': [], 'boundary_checks': [],
+                             'observations': [], 'material_requests': []}
+    try:
+        agent = run_contract_react_audit(clauses, rules_by_id, state.get('credit_snapshot'), business_type, our_party,
+                                         approval_history=approval_history, mask_mapping=mapping,
+                                         on_event=state.get('on_event'))
+    except Exception as exc:
+        agent = {'status': 'execution_failed', 'reason': f'{type(exc).__name__}: {str(exc)[:160]}', 'claims': [], 'trace': [],
+                 'boundary_checks': [], 'observations': [], 'material_requests': [str(exc)[:300]]}
+    # The mapping itself never enters the persisted report; quotes are restored
+    # to the original text before the audit object is stored.
+    for claim in agent.get('claims') or []:
+        claim['evidence_quote'] = restore_text(str(claim.get('evidence_quote') or ''), mapping)
+    agent.pop('mask_mapping', None)
+    infer = _claims_to_infer(agent.get('claims') or [], mapping)
+    # Deterministic local rules cover every clause regardless of the Agent.
+    for clause in clauses:
+        cid = clause.get('id')
+        if cid in infer:
+            continue
         local = assess_clause(clause.get('text') or '', business_type)
+        if not local:
+            continue
+        inf = {'clause_id': cid, 'page': clause.get('start_page'), 'source_ref': clause.get('source_ref', ''),
+               'requested': [], 'flags': {}, 'uncertain': {}, 'evidence_map': {}, 'facts_by_dim': {},
+               'suggestion': '', 'rule_ids': [], 'skipped': False, 'local_notes': {}}
         for rule_id, finding in local.items():
             if rule_id not in rules_by_id:
                 continue
-            dim = rule2dim[rule_id]
-            result.setdefault('flags', {})[dim] = True
-            result.setdefault('uncertain', {})[dim] = False
-            result.setdefault('evidence_map', {})[dim] = finding['evidence']
-            result.setdefault('facts_by_dim', {})[dim] = finding['facts']
-            result.setdefault('local_notes', {})[dim] = finding['note']
-        if local:
-            result['skipped'] = False
-        return result
-    def work(i):
-        clause = clauses[i]
-        local = assess_clause(clause.get('text') or '', business_type)
-        remaining = [r for r in hits.get(clause['id'], []) if r not in local]
-        if llm and remaining:
-            result = judge_one(llm, clause, remaining, business_type, our_party, rules_by_id, rule2dim)
-        else:
-            result = {'clause_id': clause['id'], 'page': clause['start_page'], 'source_ref': clause.get('source_ref', ''),
-                      'requested': [], 'flags': {}, 'uncertain': {}, 'facts_by_dim': {}, 'evidence_map': {},
-                      'suggestion': '', 'skipped': not bool(local), 'model_attempted': False, 'model_succeeded': False}
-        return i, attach_local(result, clause)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        for i, res in ex.map(work, idxs):
-            results[i] = res
-    # Deterministic policy checks cover every clause even when it is outside the
-    # bounded semantic-review window.
-    for i, clause in enumerate(clauses):
-        if results[i] is not None:
-            continue
-        local_result = attach_local({'clause_id': clause['id'], 'page': clause['start_page'], 'source_ref': clause.get('source_ref', ''),
-                                     'requested': [], 'flags': {}, 'uncertain': {}, 'facts_by_dim': {}, 'evidence_map': {},
-                                     'suggestion': '', 'rule_ids': [], 'skipped': True}, clause)
-        if not local_result.get('skipped'):
-            results[i] = local_result
-    state['infer'] = results
-    semantic_attempts = sum(1 for x in results if x and x.get('model_attempted'))
-    semantic_successes = sum(1 for x in results if x and x.get('model_succeeded'))
-    deterministic_hits = sum(1 for x in results if x and not x.get('skipped') and not x.get('model_attempted'))
-    state['semantic_llm_attempts'] = semantic_attempts
-    state['semantic_llm_successes'] = semantic_successes
+            dim = rules_by_id[rule_id]['dim']
+            inf['flags'][dim] = True
+            inf['evidence_map'][dim] = finding['evidence']
+            inf['facts_by_dim'][dim] = finding['facts']
+            inf['local_notes'][dim] = finding['note']
+            inf['rule_ids'].append(rule_id)
+        infer[cid] = inf
+    state['infer'] = [infer[cid] for cid in infer]
+    state['agent_audit'] = agent
+    boundary = agent.get('boundary_checks') or []
+    for check in boundary:
+        check['evidence_quote'] = restore_text(str(check.get('evidence_quote') or ''), mapping)
+    state['boundary_checks'] = boundary
+    state['agent_observations'] = [{'category': item.get('category'), 'summary': restore_text(str(item.get('summary') or ''), mapping),
+                                    'source_ref': item.get('source_ref', '')} for item in agent.get('observations') or []]
+    attempted = agent.get('status') in {'ready_for_policy', 'not_assessable', 'execution_failed'}
+    state['semantic_llm_attempts'] = 1 if attempted else 0
+    state['semantic_llm_successes'] = 1 if agent.get('status') == 'ready_for_policy' else 0
+    local_covered = sum(1 for inf in state['infer'] if inf.get('local_notes'))
     state['steps'].append(
-        f'条款分析：远端语义调用成功 {semantic_successes}/{semantic_attempts}，'
-        f'确定性命中 {deterministic_hits} 条（语义窗口≤{_max_analyze(len(clauses))}）'
+        f'Agent 审查：{agent.get("status")}；核验事实 {len(agent.get("claims") or [])} 条，'
+        f'授信边界对照 {len(boundary)} 项，本地规则兜底 {local_covered} 条'
     )
     return state
+
 
 def _number(value):
     try:
@@ -400,7 +324,7 @@ def node_enforce(state):
                           'severity': severity, 'level': LEVEL_TEXT[severity], 'numeric_note': note,
                           'facts': facts, 'approval_required': approval_role,
                           'decision': 'requires_approval' if approval_role else 'risk_confirmed',
-                          'decision_source': 'deterministic_policy_rule' if local_notes.get(dim) else 'strong_llm+policy_rule'})
+                          'decision_source': 'deterministic_policy_rule' if local_notes.get(dim) else 'react_agent+policy_rule'})
         for dim, is_uncertain in (inf.get('uncertain') or {}).items():
             if not is_uncertain:
                 continue
@@ -414,7 +338,24 @@ def node_enforce(state):
                                  'numeric_note': 'Agent 无法确认主体、适用条件、否定条款或审批例外',
                                  'facts': facts_by_dim.get(dim, {}), 'approval_required': rules_by_id[rule_id].get('approval_role', ''),
                                  'decision': 'needs_human_confirmation',
-                                 'decision_source': 'strong_llm_uncertain'})
+                                 'decision_source': 'react_agent_uncertain'})
+    # Agent-verified credit-boundary comparisons become approval-required risks.
+    # The comparison itself is deterministic local arithmetic; the Agent only
+    # extracted the contract-side facts.
+    boundary_approval = {'acceptance_bill': 'admin', 'vmi_jit': 'director'}
+    for check in state.get('boundary_checks') or []:
+        if check.get('verdict') in {'within', ''}:
+            continue
+        dimension = str(check.get('dimension') or '')
+        message = str(check.get('message') or '')[:200]
+        items.append({'clause_id': str(check.get('clause_id') or ''), 'page': 0, 'source_ref': '',
+                      'rule_id': 'B01', 'rule_baseline': '合同条款不得超过客户已批准授信边界',
+                      'dim': dimension, 'evidence': str(check.get('evidence_quote') or '')[:500],
+                      'suggestion': message, 'severity': 'high', 'level': LEVEL_TEXT['high'],
+                      'numeric_note': message,
+                      'facts': {'contract_value': check.get('contract_value'), 'boundary_value': check.get('boundary_value')},
+                      'approval_required': boundary_approval.get(dimension, 'director'),
+                      'decision': 'requires_approval', 'decision_source': 'credit_boundary_check'})
     # Exact unchanged clauses do not need another model call. Carry their prior
     # findings into the new version so the comparison distinguishes persistent
     # risk from a genuinely resolved clause.
@@ -437,7 +378,7 @@ def node_enforce(state):
             items.append(carried)
     seen = set(); dedup = []
     for it in items:
-        k = (it['clause_id'], it['rule_id'])
+        k = (it['clause_id'], it['rule_id'], it['dim'])
         if k in seen: continue
         seen.add(k); dedup.append(it)
     order = {'high': 0, 'mid': 1, 'low': 2}
@@ -466,11 +407,11 @@ def node_summary(state):
 def build_graph():
     g = StateGraph(State)
     for n, f in [('ingest', node_ingest), ('mask', node_mask), ('extract_fields', node_extract_fields),
-                 ('retrieve', node_retrieve), ('judge', node_judge), ('enforce', node_enforce), ('summary', node_summary)]:
+                 ('react_audit', node_react_audit), ('enforce', node_enforce), ('summary', node_summary)]:
         g.add_node(n, f)
     g.add_edge(START, 'ingest'); g.add_edge('ingest', 'mask'); g.add_edge('mask', 'extract_fields')
-    g.add_edge('extract_fields', 'retrieve'); g.add_edge('retrieve', 'judge')
-    g.add_edge('judge', 'enforce'); g.add_edge('enforce', 'summary'); g.add_edge('summary', END)
+    g.add_edge('extract_fields', 'react_audit'); g.add_edge('react_audit', 'enforce')
+    g.add_edge('enforce', 'summary'); g.add_edge('summary', END)
     return g.compile()
 
 def _review_event_sources(state):
@@ -496,17 +437,18 @@ def _review_event_sources(state):
     return list(sources.values())[-120:]
 
 
-def run_review(path, on_step=None, business_type_hint='', rule_snapshot=None, parent_report=None, on_event=None):
+def run_review(path, on_step=None, business_type_hint='', rule_snapshot=None, parent_report=None, on_event=None, credit_snapshot=None):
     app = build_graph()
     rules = rule_snapshot or RULES
     rules_by_id = {rule['id']: rule for rule in rules}
     state = {'path': path, 'steps': [], 'business_type_hint': business_type_hint, 'rules': rules,
              'rules_by_id': rules_by_id, 'rule2dim': {rule['id']: rule['dim'] for rule in rules},
-             'dim2rule': {rule['dim']: rule['id'] for rule in rules}, 'parent_report': parent_report or {}}
+             'dim2rule': {rule['dim']: rule['id'] for rule in rules}, 'parent_report': parent_report or {},
+             'credit_snapshot': credit_snapshot or {}, 'on_event': on_event}
     seen = []; last = {}
     for ev in app.stream(state, {'recursion_limit': 40}, stream_mode='values'):
         new = ev.get('steps', [])
-        for s in new[len(seed := seen):]:
+        for s in new[len(seen):]:
             seen.append(s)
             if on_step: on_step(s)
             if on_event:
@@ -527,6 +469,9 @@ def assemble_report(state, path):
             'clauses': state.get('clauses', []), 'risks': state.get('risks', []),
             'review_hints': state.get('review_hints', []), 'steps': state.get('steps', []),
             'review_scope': state.get('review_scope', {}),
+            'agent_audit': state.get('agent_audit') or {'status': 'skipped'},
+            'boundary_checks': state.get('boundary_checks') or [],
+            'agent_observations': state.get('agent_observations') or [],
             'masked_entities': len(state.get('mapping', {})),
             '_mask_mapping': state.get('mapping', {})}
     report = restore_report(report, state.get('mapping', {}))

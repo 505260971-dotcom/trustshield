@@ -102,11 +102,19 @@ def llm_mask_clause(text):
         pass
     return masked, mapping
 
-def llm_mask_batch(texts):
-    """批量本地 8B 识别：原文只发送至本地模型，返回每条的敏感实体。"""
+def llm_mask_batch(texts, *, system_prompt: str | None = None, force: bool = False, strict: bool = False):
+    """批量本地 8B 识别：原文只发送至本地模型，返回每条的敏感实体。
+
+    ``strict`` is for the credit-evidence outbound gateway: a masking-model
+    failure there must fail closed (refuse remote transfer) instead of
+    silently degrading to regex-only residuals.  Contract masking keeps the
+    tolerant behaviour.
+    """
     # Receive regex-masked clauses: PII and money never enter this second
     # stage, while clauses without technical/person-name signals skip LLM.
-    valid = [(i,t) for i,t in enumerate(texts) if t and len(t)>=20 and _needs_deep_scan(t)]
+    def _candidate(text: str) -> bool:
+        return len(text) >= 20 if force else _needs_deep_scan(text)
+    valid = [(i,t) for i,t in enumerate(texts) if t and _candidate(t)]
     if not valid:
         return {i: [] for i in range(len(texts))}
     results = {i: [] for i in range(len(texts))}
@@ -115,7 +123,7 @@ def llm_mask_batch(texts):
     if not MASK_LLM_MODEL:
         return results
 
-    sys = (MASK_PROMPT + ' 输入为多条款 JSON 数组（含 idx 和 text），输出 '
+    sys = ((system_prompt or MASK_PROMPT) + ' 输入为多条款 JSON 数组（含 idx 和 text），输出 '
            '{"items":[{"idx":int,"entities":[...]}]}。')
     # Short residual fragments keep prompt evaluation cheap.  On CPU a large
     # batch is counterproductive because JSON output generation is ~5 tok/s.
@@ -140,7 +148,8 @@ def llm_mask_batch(texts):
             for it in data.get('items', []):
                 results[int(it.get('idx'))] = it.get('entities', []) or []
         except Exception:
-            pass
+            if strict:
+                raise
     return results
 
 def mask_clauses_smart(clauses):

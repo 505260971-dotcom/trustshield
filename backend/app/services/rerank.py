@@ -21,6 +21,7 @@ from ..config import (
 )
 from .embedding import EmbeddingUnavailable, semantic_recall
 from .llm import clip_text_to_tokens
+from .mask import mask_text as _mask_text
 
 
 _WORD = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]{1,}")
@@ -28,6 +29,18 @@ _WORD = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]{1,}")
 
 class RerankUnavailable(RuntimeError):
     """Production audit cannot continue when mandatory reranking is unavailable."""
+
+
+def _require_masked(candidates: list[dict[str, Any]]) -> None:
+    """Refuse to send any non-empty evidence block that was never masked.
+
+    This is the structural guarantee that financial evidence only leaves the
+    machine in masked form: every outbound path funnels through this check,
+    and a caller that forgets to mask fails closed instead of leaking text.
+    """
+    for item in candidates:
+        if str(item.get('text') or '') and not str(item.get('masked_text') or ''):
+            raise RerankUnavailable('\u5b58\u5728\u672a\u8131\u654f\u8d22\u52a1\u8bc1\u636e\u5757\uff0c\u62d2\u7edd\u5916\u53d1')
 
 
 def _terms(text: str) -> set[str]:
@@ -66,7 +79,9 @@ def lexical_recall(query: str, candidates: list[dict[str, Any]], limit: int | No
 
 def _rerank_document(candidate: dict[str, Any]) -> str:
     anchor = str(candidate.get('source_ref') or '')
-    document = f"【来源：{anchor}】\n{candidate.get('text') or ''}" if anchor else str(candidate.get('text') or '')
+    # Only masked text is ever sent; _require_masked has already rejected any
+    # candidate that did not go through the local masking gateway.
+    document = f"【来源：{anchor}】\n{candidate.get('masked_text') or ''}" if anchor else str(candidate.get('masked_text') or '')
     return clip_text_to_tokens(document, RERANK_DOCUMENT_TOKEN_BUDGET)
 
 
@@ -91,78 +106,6 @@ def hybrid_recall(query: str, candidates: list[dict[str, Any]]) -> tuple[list[di
     return [dict(item) | {'hybrid_score': round(score, 7)} for score, _, item in ranked], 'hybrid_lexical_embedding'
 
 
-def rerank(query: str, candidates: list[dict[str, Any]], top_n: int | None = None, instruct: str = '') -> dict[str, Any]:
-    """Return one request-local ordering and its audit metadata.
-
-    qwen relevance scores are not comparable across requests.  The caller must
-    therefore treat them solely as ordering metadata for this invocation.
-    """
-    try:
-        shortlisted, recall_mode = hybrid_recall(query, candidates)
-    except EmbeddingUnavailable as exc:
-        shortlisted, recall_mode = lexical_recall(query, candidates), 'lexical_embedding_failed'
-    wanted = min(len(shortlisted), top_n or RERANK_TOP_N)
-    base = {
-        'query': query,
-        'candidate_count': len(shortlisted),
-        'top_n': wanted,
-        'model': RERANK_MODEL,
-        'recall_mode': recall_mode,
-    }
-    if not shortlisted:
-        return base | {'mode': 'empty', 'results': [], 'fallback_reason': 'no_candidates'}
-    if not configured_rerank():
-        return base | {
-            'mode': 'lexical_fallback', 'results': [dict(item) | {'rank': rank + 1} for rank, item in enumerate(shortlisted[:wanted])],
-            'fallback_reason': 'rerank_not_explicitly_configured',
-        }
-
-    payload = {
-        'model': RERANK_MODEL,
-        'query': clip_text_to_tokens(query, RERANK_DOCUMENT_TOKEN_BUDGET),
-        'documents': [_rerank_document(item) for item in shortlisted],
-        'top_n': wanted,
-        'instruct': instruct or 'Given a credit-review evidence request, retrieve passages that directly prove the requested fact. Prefer primary source evidence over commentary.',
-    }
-    request = Request(
-        RERANK_BASE_URL.rstrip('/') + '/reranks',
-        data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
-        headers={'Authorization': f'Bearer {RERANK_API_KEY}', 'Content-Type': 'application/json'},
-        method='POST',
-    )
-    try:
-        with urlopen(request, timeout=RERANK_TIMEOUT_SECONDS) as response:  # nosec B310: URL is deployment configuration
-            data = json.loads(response.read().decode('utf-8'))
-        rows = data.get('results') if isinstance(data, dict) else None
-        if not isinstance(rows, list):
-            raise ValueError('rerank 响应缺少 results')
-        results: list[dict[str, Any]] = []
-        used: set[int] = set()
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            index = row.get('index')
-            if not isinstance(index, int) or index < 0 or index >= len(shortlisted) or index in used:
-                continue
-            used.add(index)
-            try:
-                score = float(row.get('relevance_score'))
-            except (TypeError, ValueError):
-                score = None
-            results.append(dict(shortlisted[index]) | {'rank': len(results) + 1, 'rerank_index': index, 'relevance_score': score})
-        if not results:
-            raise ValueError('rerank 响应未返回有效索引')
-        return base | {
-            'mode': 'qwen3-rerank', 'request_id': str(data.get('id') or data.get('request_id') or ''),
-            'results': results[:wanted],
-        }
-    except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
-        return base | {
-            'mode': 'lexical_fallback', 'results': [dict(item) | {'rank': rank + 1} for rank, item in enumerate(shortlisted[:wanted])],
-            'fallback_reason': f'{type(exc).__name__}: {str(exc)[:180]}',
-        }
-
-
 def rerank_required(query: str, candidates: list[dict[str, Any]], top_n: int | None = None, instruct: str = '') -> dict[str, Any]:
     """Run qwen3-rerank for production credit audit or fail closed.
 
@@ -172,6 +115,7 @@ def rerank_required(query: str, candidates: list[dict[str, Any]], top_n: int | N
     """
     if not configured_rerank():
         raise RerankUnavailable('qwen3-rerank 未配置或未获财务数据传输授权')
+    _require_masked(candidates)
     try:
         shortlisted, recall_mode = hybrid_recall(query, candidates)
     except EmbeddingUnavailable as exc:
@@ -181,7 +125,7 @@ def rerank_required(query: str, candidates: list[dict[str, Any]], top_n: int | N
         return {'mode': 'empty', 'query': query, 'candidate_count': 0, 'top_n': 0, 'model': RERANK_MODEL, 'recall_mode': recall_mode, 'results': []}
     payload = {
         'model': RERANK_MODEL,
-        'query': clip_text_to_tokens(query, RERANK_DOCUMENT_TOKEN_BUDGET),
+        'query': _mask_text(clip_text_to_tokens(query, RERANK_DOCUMENT_TOKEN_BUDGET))[0],
         'documents': [_rerank_document(item) for item in shortlisted],
         'top_n': wanted,
         'instruct': instruct or 'Given a credit-review evidence request, retrieve passages that directly prove the requested fact. Prefer primary source evidence over commentary.',

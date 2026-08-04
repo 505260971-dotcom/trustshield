@@ -21,6 +21,7 @@ from ..config import (
     EMBEDDING_ENABLED, EMBEDDING_MODEL, EMBEDDING_TIMEOUT_SECONDS, configured_embedding,
 )
 from .llm import clip_text_to_tokens
+from .mask import mask_text as _mask_text
 
 
 class EmbeddingUnavailable(RuntimeError):
@@ -120,11 +121,17 @@ def semantic_recall(query: str, candidates: list[dict[str, Any]], limit: int | N
         raise EmbeddingUnavailable('embedding 已启用但缺少模型、地址、密钥或财务数据传输授权')
     if not configured_embedding():
         return []
+    # Same structural guarantee as rerank._require_masked: only masked evidence
+    # may leave the machine for vectorization.
+    for item in candidates:
+        if str(item.get('text') or '') and not str(item.get('masked_text') or ''):
+            raise EmbeddingUnavailable('存在未脱敏财务证据块，拒绝外发')
     size = min(len(candidates), limit or EMBEDDING_CANDIDATE_LIMIT)
     selected = candidates[:size]
     if not selected:
         return []
-    vectors = embed_texts([query, *[str(item.get('text') or '') for item in selected]])
+    vectors = embed_texts([_mask_text(str(query or ''))[0],
+                           *[str(item.get('masked_text') or '') for item in selected]])
     query_vector = vectors[0]
     scored = []
     for index, (candidate, vector) in enumerate(zip(selected, vectors[1:])):

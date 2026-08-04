@@ -53,8 +53,8 @@ def main():
 
         embedding.urlopen = fake_urlopen
         rows = embedding.semantic_recall('偿债能力', [
-            {'chunk_id': 'A', 'text': '流动资产和流动负债'},
-            {'chunk_id': 'B', 'text': '客户新闻报道'},
+            {'chunk_id': 'A', 'text': '流动资产和流动负债', 'masked_text': '流动资产和流动负债'},
+            {'chunk_id': 'B', 'text': '客户新闻报道', 'masked_text': '客户新闻报道'},
         ])
         assert captured['url'].endswith('/compatible-api/v1/embeddings')
         assert captured['payload']['model'] == 'text-embedding-test'

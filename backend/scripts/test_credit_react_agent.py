@@ -14,7 +14,7 @@ class _Response:
 
 
 def _records():
-    return [
+    rows = [
         {'text': '测试客户 合并口径 2025年度 单位：人民币千元', 'source_ref': '第1页', 'source_kind': 'pdf', 'start_page': 1},
         {'text': '营业收入 120,000', 'source_ref': '第2页 · 表格1第1行', 'source_kind': 'table', 'start_page': 2},
         {'text': '流动资产 80,000', 'source_ref': '第2页 · 表格1第2行', 'source_kind': 'table', 'start_page': 2},
@@ -24,6 +24,9 @@ def _records():
         {'text': '净利润 10,000', 'source_ref': '第3页 · 表格1第1行', 'source_kind': 'table', 'start_page': 3},
         {'text': '经营活动产生的现金流量净额 13,000', 'source_ref': '第3页 · 表格1第2行', 'source_kind': 'table', 'start_page': 3},
     ]
+    # Already-masked records let the test run without a live masking model;
+    # the masking gateway reuses them unchanged.
+    return [{**row, 'text_masked': row['text']} for row in rows]
 
 
 def _claims():

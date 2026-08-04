@@ -750,6 +750,10 @@ def _run(path: str, job_id: str, created_at: float):
             on_event=lambda event: _publish_review_event(job_id, event),
             business_type_hint=job.get('business_type',''), rule_snapshot=job.get('rule_snapshot'),
             parent_report=job.get('parent_report'),
+            credit_snapshot={'case_id': job['credit_case']['case_id'],
+                             'customer_name': job['credit_case'].get('customer_name') or '',
+                             'version': job['credit_case'].get('version'),
+                             'conditions': job['credit_case'].get('conditions') or {}},
         )
         credit_case = job['credit_case']
         exposure = store.latest_credit_exposure_snapshot(credit_case['case_id'])

@@ -53,21 +53,24 @@ LOCAL_CONTEXT_TOKENS = 2048
 
 
 DEFAULT_MODEL_RUNTIME_CONFIG: dict[str, Any] = {
-    'llm_api_base': '', 'llm_api_key': '', 'llm_model': '', 'llm_timeout_seconds': 60,
+    # Default providers are pre-filled so a fresh deployment only needs API
+    # keys.  Keys are deliberately left empty; everything stays fail-closed
+    # until an administrator supplies them in 系统设置.
+    'llm_api_base': 'https://api.deepseek.com/v1', 'llm_api_key': '', 'llm_model': 'deepseek-v4-flash', 'llm_timeout_seconds': 60,
     'ollama_base': 'http://localhost:11434',
     'enable_masking': True, 'smart_mask': False,
     'mask_llm_api_base': 'http://localhost:11434/v1', 'mask_llm_api_key': 'ollama',
-    'mask_llm_model': '', 'mask_llm_native_ollama': True, 'mask_llm_think': False,
+    'mask_llm_model': 'qwen3.5:4b', 'mask_llm_native_ollama': True, 'mask_llm_think': False,
     'mask_llm_max_output': 160, 'mask_llm_deep_scan': False,
     'financial_llm_extraction': True, 'financial_llm_mode': 'remote_substitute',
     'financial_llm_api_base': '', 'financial_llm_api_key': '', 'financial_llm_model': '',
-    'rerank_enabled': False, 'rerank_allow_remote_financial_data': False,
-    'rerank_base_url': '', 'rerank_api_key': '', 'rerank_model': 'qwen3-rerank',
+    'rerank_enabled': True, 'rerank_allow_remote_financial_data': True,
+    'rerank_base_url': 'https://dashscope.aliyuncs.com/compatible-api/v1', 'rerank_api_key': '', 'rerank_model': 'qwen3-rerank',
     'rerank_timeout_seconds': 20, 'rerank_candidate_limit': 36, 'rerank_top_n': 6,
     'rerank_document_token_budget': 3000,
-    'embedding_enabled': False, 'embedding_allow_remote_financial_data': False,
-    'embedding_base_url': '', 'embedding_api_key': '', 'embedding_model': '',
-    'embedding_dimensions': 0, 'embedding_timeout_seconds': 20,
+    'embedding_enabled': True, 'embedding_allow_remote_financial_data': True,
+    'embedding_base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'embedding_api_key': '', 'embedding_model': 'qwen3.7-text-embedding',
+    'embedding_dimensions': 1024, 'embedding_timeout_seconds': 20,
     'embedding_candidate_limit': 36, 'embedding_document_token_budget': 1200,
 }
 
