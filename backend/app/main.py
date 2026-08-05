@@ -21,6 +21,7 @@ from .config import (
     configured_embedding, configured_financial_llm, configured_llm, configured_rerank,
     ensure_model_runtime_config_file, secure_runtime_ready,
 )
+from .services.assistant import build_assistant_context, build_messages, chat_llm, mentioned_rule_ids, stream_assistant_answer
 from .services.export_docx import export_revised_docx
 from .services.integrations import APPROVAL_ROLES, crm, oa
 from .services.translate import run_translate
@@ -930,6 +931,46 @@ async def stream(job_id: str, user=Depends(require('review:read'))):
 
 @app.get('/api/reviewers')
 async def reviewers(user=Depends(require('review:read'))): return {'items':store.list_reviewers()}
+
+@app.post('/api/reviews/{job_id}/assistant/chat')
+async def assistant_chat(job_id: str, body: dict, user=Depends(require('review:read'))):
+    """案件审查助理：基于当前案件真实上下文（报告/信用条件/处置状态）的流式问答。
+
+    上下文只包含本案已落库的事实，证据与合同字段经本地脱敏后送入模型；
+    模型未配置时返回 503，前端回退到内置规则回答，不会静默编造内容。
+    """
+    _assert_case_access(job_id, user)
+    rec = store.get_review(job_id)
+    if not rec or rec.get('status') != 'done':
+        raise HTTPException(409, '当前版本审查尚未完成，助理暂不能回答')
+    question = str((body or {}).get('question') or '').strip()
+    if not question:
+        raise HTTPException(400, '问题不能为空')
+    if not configured_llm():
+        raise HTTPException(503, '实时解答模型未配置；当前可使用内置规则回答')
+    report = rec.get('report') or {}
+    findings = store.list_findings(job_id)
+    approvals = store.list_approvals(job_id, user)
+    materials = store.list_material_requests(job_id)
+    case = store.get_case(job_id) or {}
+    context = build_assistant_context(job_id, report, findings, approvals, materials, case)
+    messages = build_messages(question, context, (body or {}).get('history') or [])
+    llm = chat_llm()
+    risks = report.get('risks') or []
+    store.audit(user, 'review.assistant_chat', 'review', job_id, {'question': question[:200]})
+
+    async def gen():
+        answer_parts: list[str] = []
+        try:
+            async for text in stream_assistant_answer(llm, messages):
+                answer_parts.append(text)
+                yield f'event: delta\ndata: {json.dumps({"text": text}, ensure_ascii=False)}\n\n'
+            sources = mentioned_rule_ids(''.join(answer_parts), risks)
+            yield f'event: done\ndata: {json.dumps({"sources": sources}, ensure_ascii=False)}\n\n'
+        except Exception as exc:
+            yield f'event: error\ndata: {json.dumps({"message": f"{type(exc).__name__}: {str(exc)[:240]}"}, ensure_ascii=False)}\n\n'
+
+    return StreamingResponse(gen(), media_type='text/event-stream')
 
 @app.get('/api/reviews/{job_id}/signability')
 async def review_signability(job_id: str, user=Depends(require('review:read'))):

@@ -213,7 +213,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
               {jid && (
                 <ContractReviewWorkspace jobId={jid} report={report}/>
               )}
-              <CaseReviewAssistant report={report} risks={visibleRisks} onSelectRisk={selectRisk} />
+              <CaseReviewAssistant report={report} risks={visibleRisks} onSelectRisk={selectRisk} jobId={jid} />
             </div>,
           },
           {

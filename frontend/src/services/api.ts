@@ -19,6 +19,18 @@ export const api={
  me:():Promise<any>=>fetch('/api/auth/me',{headers:headers()}).then(j),
  health:():Promise<HealthInfo>=>fetch('/api/health',{headers:headers()}).then(j), rules:():Promise<{rules:RuleItem[]}>=>fetch('/api/rules',{headers:headers()}).then(j),
   reviewDetail:(id:string):Promise<{report:Report;status:string;findings?:any[];approvals?:ApprovalItem[];material_requests?:MaterialRequest[]}>=>fetch(`/api/reviews/${id}`,{headers:headers()}).then(j), signability:(id:string):Promise<SignabilityPlan>=>fetch(`/api/reviews/${id}/signability`,{headers:headers()}).then(j), reviewStatus:(id:string):Promise<ReviewJobStatus>=>fetch(`/api/reviews/${id}/status`,{headers:headers()}).then(j), reviewPreview:(id:string):Promise<ContractPreview>=>fetch(`/api/reviews/${id}/preview`,{headers:headers()}).then(j), stats:():Promise<Stats>=>fetch('/api/stats',{headers:headers()}).then(j),
+  assistantChat:(jobId:string,body:{question:string;history?:{role:'user'|'assistant';content:string}[]},onEvent:(type:string,data:any)=>void):Promise<void>=>new Promise((resolve,reject)=>{
+    fetch(`/api/reviews/${jobId}/assistant/chat`,{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(async r=>{ if(!r.ok){let t='';try{t=await r.text()}catch{};throw new Error(t||`HTTP ${r.status}`)} if(!r.body)throw new Error('无响应流')
+        const reader=r.body.getReader();const decoder=new TextDecoder();let buffer=''
+        const pump=():Promise<void>=>reader.read().then(({done,value})=>{ if(done){resolve();return} buffer+=decoder.decode(value,{stream:true})
+          let idx:number; while((idx=buffer.indexOf('\n\n'))>=0){const block=buffer.slice(0,idx);buffer=buffer.slice(idx+2)
+            const matchEvent=block.match(/^event:\s*(.+)$/m);const matchData=block.match(/^data:\s*(.+)$/m)
+            const eventType=matchEvent?matchEvent[1].trim():'message'
+            if(matchData){try{onEvent(eventType,JSON.parse(matchData[1]))}catch{onEvent(eventType,{text:matchData[1]})}}}
+          return pump() }).catch(reject)
+        return pump() }).catch(reject)
+  }),
   upload:(file:File,request:ReviewRequest):Promise<{job_id:string;case_id:string}>=>{if(!request.case_id) return Promise.reject(new Error('必须先创建合同案件'));const fd=new FormData();fd.append('file',file);Object.entries(request).forEach(([k,v])=>{if(k!=='case_id'&&v!==undefined&&v!==null&&v!=='')fd.append(k,String(v))});return fetch(`/api/case-center/cases/${request.case_id}/documents`,{method:'POST',headers:headers(),body:fd}).then(j)},
   workItems:(limit=100):Promise<{items:WorkItem[]}>=>fetch(`/api/workbench/tasks?limit=${limit}`,{headers:headers()}).then(j),
   workbox:(bucket:'todo'|'in_progress'|'draft'|'done',limit=200):Promise<{items:WorkboxItem[]}>=>fetch(`/api/workboxes/${bucket}?limit=${limit}`,{headers:headers()}).then(j),
