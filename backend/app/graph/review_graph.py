@@ -88,7 +88,7 @@ def node_mask(state):
         state['steps'].append(f'合同脱敏（正则）：已保护 {len(mp)} 个敏感信息')
     return state
 
-FIELD_PROMPT = '你是合同字段抽取子Agent。我方=乙方(供方/制造方东江集团)。文本中<MASK-AMOUNT-...>代表已脱敏金额，识别总合同金额时输出该占位符到total_amount_ref，不要猜测原始金额。只输出JSON: {"business_type":"TKM|TKP|模塑一体|一般","our_party":"甲方|乙方","parties":{"甲方":"","乙方":""},"total_amount_ref":"<MASK-...>|null","currency":"USD|HKD|RMB|EUR|...","validity_years":number_or_null,"payment_terms":"简述付款节点"}'
+FIELD_PROMPT = '你是合同字段抽取子Agent。我方=乙方(供方/制造方东江集团)。文本中<MASK-AMOUNT-...>代表已脱敏金额，识别总合同金额时输出该占位符到total_amount_ref，不要猜测原始金额。占位符必须原样保留完整编号（如 <MASK-AMOUNT-1>），不要去掉或改写编号，也不要猜测不存在的占位符。只输出JSON: {"business_type":"TKM|TKP|模塑一体|一般","our_party":"甲方|乙方","parties":{"甲方":"","乙方":""},"total_amount_ref":"<MASK-...>|null","currency":"USD|HKD|RMB|CNY|EUR|...","validity_years":number_or_null,"payment_terms":"简述付款节点"}'
 
 def _restore_field_values(value, mapping):
     if isinstance(value, str):
@@ -103,12 +103,31 @@ def _hydrate_masked_amount(fields, mapping):
     """强模型只返回金额占位符；本地再从映射表恢复数值与币种，原始金额不进入 Prompt。"""
     ref = fields.get('total_amount_ref') or fields.get('total_amount')
     raw = mapping.get(ref, ref) if isinstance(ref, str) else ref
+    # 模型偶尔会丢掉占位符编号（如 <MASK-AMOUNT> vs <MASK-AMOUNT-1>）。
+    # 先按占位符家族做模糊匹配；仍解析不到时由确定性正则兜底。
+    if isinstance(raw, str) and raw.startswith('<MASK-') and raw not in mapping:
+        # 占位符格式为 <MASK-AMOUNT-1>（编号在 > 之前）；模型偶尔会丢掉编号。
+        family_match = re.match(r'^(<MASK-[A-Z_]+)', raw)
+        family = family_match.group(1) if family_match else raw.rstrip('0123456789>')
+        candidates = [value for key, value in mapping.items() if key.startswith(family + '-')]
+        if len(candidates) == 1:
+            raw = candidates[0]
+        elif candidates:
+            with_number = [value for value in candidates if any(char.isdigit() for char in value)]
+            if len(with_number) == 1:
+                raw = with_number[0]
     if not isinstance(raw, str):
         return fields
     amounts = extract_numerics(raw).get('amounts', [])
+    if not amounts:
+        # extract_numerics 不识别 CNY/HKD 后缀；与信用合规检查同一口径再兜底一次。
+        from ..services.credit import contract_amount_from_text
+        fallback = contract_amount_from_text(raw)
+        if fallback:
+            amounts = [{'value': fallback[0], 'currency': fallback[1]}]
     if amounts:
         fields['total_amount'] = amounts[0]['value']
-        fields['currency'] = fields.get('currency') or amounts[0]['currency']
+        fields['currency'] = (fields.get('currency') or amounts[0]['currency']).replace('RMB', 'CNY')
     return fields
 
 
@@ -155,6 +174,17 @@ def node_extract_fields(state):
     # 字段只在强模型返回后于本地恢复，保证报告中的合同主体和金额可追溯。
     mapping = state.get('mapping', {})
     state['contract_fields'] = _restore_field_values(_hydrate_masked_amount(f, mapping), mapping)
+    # 模型占位符无法还原时，用确定性正则从还原后的条款文本兜底提取金额，
+    # 保证合同总金额字段始终可用于报告、信用门禁与助理问答。
+    if not state['contract_fields'].get('total_amount'):
+        from ..services.credit import contract_amount_from_text
+        raw_text = '\n'.join(str(item.get('text') or '') for item in state.get('clauses') or [])
+        fallback = contract_amount_from_text(raw_text, state['contract_fields'].get('currency', ''))
+        if fallback:
+            amount, currency = fallback
+            state['contract_fields']['total_amount'] = amount
+            state['contract_fields']['currency'] = currency
+            state['steps'].append(f'合同信息提取：模型金额占位符不可还原，已按原文确定性提取 {amount:g} {currency}')
     if state.get('business_type_hint'):
         state['contract_fields']['business_type'] = state['business_type_hint']
     state['steps'].append(f'合同信息提取：我方={f.get("our_party")} 业务={f.get("business_type")} 有效期={f.get("validity_years")}')

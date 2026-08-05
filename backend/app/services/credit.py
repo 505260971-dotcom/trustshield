@@ -121,6 +121,24 @@ def assess_customer_binding(contract_fields: dict[str, Any], customer_name: str)
     return []
 
 
+def contract_amount_from_text(text: str, currency: str = '') -> tuple[float, str] | None:
+    """从合同全文确定性提取“带币种的金额”中的最大一笔及其币种。
+
+    与合规检查同一口径（_AMOUNT 正则 + 币种过滤），供字段抽取在模型
+    结果不可还原时兜底，避免总金额字段缺失影响报告与信审门禁。
+    """
+    text = str(text or '')
+    if not text:
+        return None
+    amounts = [(float(raw.replace(',', '')), currency_label.upper()) for raw, currency_label in _AMOUNT.findall(text)]
+    if not amounts:
+        return None
+    preferred = str(currency or '').upper()
+    candidates = [item for item in amounts if item[1] in {preferred, '人民币', '元', 'RMB', 'CNY'}]
+    candidates = candidates or amounts
+    return max(candidates, key=lambda item: item[0])
+
+
 def assess_credit_compliance(clauses: list[dict], conditions: dict[str, Any], exposure_snapshot: dict[str, Any] | None=None, business_type: str='') -> list[dict]:
     """Return non-overridable findings when contract terms are worse than credit terms.
 
