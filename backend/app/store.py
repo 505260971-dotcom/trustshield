@@ -1382,7 +1382,15 @@ def list_customer_workspaces(actor: dict, limit: int=200) -> list[dict]:
     init_db()
     max_items = min(max(limit, 1), 500)
     with _lock, _conn() as c:
-        credit_filter, credit_params = ('', []) if actor.get('role') != 'business' else ('WHERE cc.created_by=?', [actor.get('id')])
+        # 客户工作台＝发起＋查看客户全景。业务申请人除了自己发起的信审，
+        # 还应看到自己合同所涉及客户的信审记录（含已生效版本），否则
+        # 客户全景里的额度卡片对业务永远是空的。
+        # 注意：contract_cases 没有 customer_key 列，子查询必须用两表都有的
+        # customer_name，且用别名显式限定，避免 SQLite 把子查询里的列名
+        # 解析为外层 cc.customer_key（关联子查询陷阱导致全部信审泄漏）。
+        credit_filter, credit_params = ('', []) if actor.get('role') != 'business' else (
+            'WHERE (cc.created_by=? OR cc.customer_name IN (SELECT DISTINCT c2.customer_name FROM contract_cases c2 WHERE c2.created_by=?))',
+            [actor.get('id'), actor.get('id')])
         credit_rows = c.execute(f'''SELECT cc.case_id,cc.customer_key,cc.customer_name,cc.version,cc.status,cc.business_type,
                                            cc.created_at,cc.updated_at,cc.assigned_to,u.display_name AS assigned_name
                                     FROM credit_cases cc LEFT JOIN users u ON u.id=cc.assigned_to
