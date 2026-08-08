@@ -372,7 +372,7 @@ def node_enforce(state):
     # Agent-verified credit-boundary comparisons become approval-required risks.
     # The comparison itself is deterministic local arithmetic; the Agent only
     # extracted the contract-side facts.
-    boundary_approval = {'acceptance_bill': 'admin', 'vmi_jit': 'director'}
+    boundary_approval = {'acceptance_bill': 'final_approver', 'vmi_jit': 'director'}
     for check in state.get('boundary_checks') or []:
         if check.get('verdict') in {'within', ''}:
             continue

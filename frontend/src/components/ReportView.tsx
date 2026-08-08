@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Card, Row, Col, Statistic, Result, Tabs, Table, Descriptions, Empty, List, Button, Collapse, Dropdown, Space, Typography, Alert, Tag, message, Modal, Input, Select } from 'antd'
 import { DownloadOutlined, SafetyCertificateOutlined, ReloadOutlined, FileWordOutlined, TranslationOutlined, SwapOutlined, FileTextOutlined, LeftOutlined, RightOutlined, DashboardOutlined, RobotOutlined, WarningOutlined, ProfileOutlined, AuditOutlined } from '@ant-design/icons'
-import type { KnowledgeItem, Report, Risk, RuleItem, SignabilityPlan as SignabilityPlanData, VersionComparison } from '../types'
+import type { Report, Risk, RuleItem, SignabilityPlan as SignabilityPlanData, VersionComparison } from '../types'
 import { riskTableCols, clauseTableCols, overallColor, downloadText, roleRiskVisible, roleRiskHighlight } from './common'
 import { useRole, ROLE_DESC } from '../context/RoleContext'
 import { api } from '../services/api'
@@ -46,7 +46,6 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   const [comparison, setComparison] = useState<VersionComparison|null>(null)
   const [signability, setSignability] = useState<SignabilityPlanData|null>(null)
   const [signabilityLoading, setSignabilityLoading] = useState(false)
-  const [similarCases, setSimilarCases] = useState<KnowledgeItem[]>([])
   const [activeLang, setActiveLang] = useState('en')
   const [focusClauseId, setFocusClauseId] = useState<string>('')
   const [focusRiskKey, setFocusRiskKey] = useState<string>('')
@@ -156,9 +155,8 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
   }
   const canAct = ['信用审核专员','财务审批主管','集团财务总监 / 最终审批人'].includes(role)
   const openAction = (risk: Risk) => {
-    setActionRisk(risk); setActionType('adopt'); setActionReason(''); setEditedSuggestion(risk.suggestion || ''); setSimilarCases([])
+    setActionRisk(risk); setActionType('adopt'); setActionReason(''); setEditedSuggestion(risk.suggestion || '')
     if (!rules.length) api.rules().then(result => setRules(result.rules)).catch(() => {})
-    if (jid && risk.finding_id) api.findingKnowledge(jid, risk.finding_id).then(result => setSimilarCases(result.items)).catch(() => {})
   }
   const submitAction = async () => {
     if (!jid || !actionRisk?.finding_id) { message.warning('当前风险项尚未同步到案件记录'); return }
@@ -237,7 +235,16 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
           </Space>} />
         {report.credit_decision && <Alert type="success" showIcon style={{marginBottom:12}}
             message={`已绑定信用审核：${report.credit_decision.customer_name} · V${report.credit_decision.version}`}
-          description={`最长账期 ${report.credit_decision.conditions?.max_payment_days||0} 天；交付前最低收款比例 ${report.credit_decision.conditions?.min_prepayment_ratio||0}%；额度上限 ${report.credit_decision.conditions?.max_credit_amount||0} ${report.credit_decision.conditions?.currency||'CNY'}。不符合信用审核条件的项目不能在合同端处理或导出。`} />}
+          description={`该版本已由信用审核专员确认生效。最长账期 ${report.credit_decision.conditions?.max_payment_days||0} 天；交付前最低收款比例 ${report.credit_decision.conditions?.min_prepayment_ratio||0}%；额度上限 ${report.credit_decision.conditions?.max_credit_amount||0} ${report.credit_decision.conditions?.currency||'CNY'}。不符合信用审核条件的项目不能在合同端处理或导出。`} />}
+        {report.credit_decision && <Card size="small" style={{marginBottom:12}} title="信用审核专员已纳入的联网公开信息">
+          {(report.credit_decision.external_reviews||[]).length
+            ? <List size="small" dataSource={report.credit_decision.external_reviews} renderItem={(item:any)=><List.Item>
+                <List.Item.Meta title={<Space wrap><Tag color={item.severity==='high'?'red':'orange'}>{item.code||'外部线索'}</Tag><Text strong>{item.title||'未命名公开线索'}</Text></Space>}
+                  description={<Space direction="vertical" size={2}><Text>{item.note||'审核专员已纳入本次信用判断。'}</Text>{item.source_url&&<a href={item.source_url} target="_blank" rel="noreferrer">打开原始公开来源</a>}</Space>} />
+              </List.Item>}/>
+            : <Text type="secondary">本信用审核未纳入联网公开风险线索。</Text>}
+          <Text type="secondary" style={{display:'block',marginTop:8}}>后续合同审批人可据此批准、退回信用审核专员重新判断、退回业务补充材料或驳回合同；无需重复审批同一笔信用审核。</Text>
+        </Card>}
         {reviewHints.length > 0 && <Alert type="warning" showIcon style={{marginBottom:12}}
           message={`待人工确认 ${reviewHints.length} 条：系统无法确认主体、条件、否定或审批例外；这些项目不计入已确认风险。`} />}
 
@@ -310,7 +317,7 @@ export default function ReportView ({ report, onReset, jobId, showLegacyWorkflow
 
       <TranslateModal jobId={jid} open={transOpen} onClose={()=>setTransOpen(false)} onTranslated={(lang)=>setActiveLang(lang)} />
       <Modal title={`处理风险 ${actionRisk?.rule_id||''}`} open={!!actionRisk} onCancel={()=>setActionRisk(null)} onOk={submitAction} okText="确认提交" confirmLoading={actionBusy}>
-        <Space direction="vertical" style={{width:'100%'}}><Button.Group><Button type={actionType==='adopt'?'primary':'default'} onClick={()=>setActionType('adopt')}>采用修改建议</Button><Button type={actionType==='ignore'?'primary':'default'} onClick={()=>setActionType('ignore')}>确认该风险不适用</Button><Button type={actionType==='edit'?'primary':'default'} onClick={()=>setActionType('edit')}>编辑后采用</Button></Button.Group>{actionType==='ignore'&&<Alert type="warning" showIcon message="此操作不会删除系统风险记录" description="请说明该规则不适用于当前合同的事实依据；处理结果将保留在案件审计记录中。"/>}{similarCases.length>0&&<Alert type="info" showIcon message={`相似已采纳案例（${similarCases.length}）`} description={<List size="small" dataSource={similarCases} renderItem={item=><List.Item><Text>{item.suggested_text || item.evidence || '历史案例'}</Text></List.Item>}/>}/>} {actionType==='edit'&&<><Select value={editedSuggestion || undefined} placeholder="选择该规则的红线改写模板" options={rules.filter(rule=>rule.id===actionRisk?.rule_id&&!!rule.template).map(rule=>({value:rule.template,label:rule.template}))} onChange={setEditedSuggestion}/><Input.TextArea value={editedSuggestion} onChange={e=>setEditedSuggestion(e.target.value)} placeholder="可在模板基础上编辑建议替换文本" rows={4}/></>}<Input.TextArea value={actionReason} onChange={e=>setActionReason(e.target.value)} placeholder="必填：说明处置依据、审批例外或业务原因" rows={4}/></Space>
+        <Space direction="vertical" style={{width:'100%'}}><Button.Group><Button type={actionType==='adopt'?'primary':'default'} onClick={()=>setActionType('adopt')}>采用修改建议</Button><Button type={actionType==='ignore'?'primary':'default'} onClick={()=>setActionType('ignore')}>确认该风险不适用</Button><Button type={actionType==='edit'?'primary':'default'} onClick={()=>setActionType('edit')}>编辑后采用</Button></Button.Group>{actionType==='ignore'&&<Alert type="warning" showIcon message="此操作不会删除系统风险记录" description="请说明该规则不适用于当前合同的事实依据；处理结果将保留在案件审计记录中。"/>} {actionType==='edit'&&<><Select value={editedSuggestion || undefined} placeholder="选择该规则的红线改写模板" options={rules.filter(rule=>rule.id===actionRisk?.rule_id&&!!rule.template).map(rule=>({value:rule.template,label:rule.template}))} onChange={setEditedSuggestion}/><Input.TextArea value={editedSuggestion} onChange={e=>setEditedSuggestion(e.target.value)} placeholder="可在模板基础上编辑建议替换文本" rows={4}/></>}<Input.TextArea value={actionReason} onChange={e=>setActionReason(e.target.value)} placeholder="必填：说明处置依据、审批例外或业务原因" rows={4}/></Space>
       </Modal>
       {showVersionCompare&&<Modal title="合同版本对比" open={compareOpen} onCancel={()=>setCompareOpen(false)} onOk={compareVersions} okText="开始对比">
         <Input value={baselineId} onChange={event=>setBaselineId(event.target.value)} placeholder="输入上一版本的任务 ID" />

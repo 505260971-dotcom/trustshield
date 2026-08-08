@@ -18,6 +18,7 @@ from ..config import configured_llm
 from ..services.credit_evidence import build_document_manifest, build_evidence_chunks
 from ..services.credit_react_agent import run_react_credit_audit
 from ..services.credit_model import recommend_conditions
+from ..services.exa_mcp import run_external_due_diligence
 from ..services.llm import get_llm, invoke_remote
 from ..services.parse import PARSER_VERSION, read_paragraphs, text_asset_status
 from ..services.smart_mask import restore_text
@@ -36,6 +37,7 @@ class CreditState(TypedDict, total=False):
     report: dict[str, Any]
     records_by_document: dict[str, list[dict[str, Any]]]
     react_audit: dict[str, Any]
+    external_due_diligence: dict[str, Any]
     on_event: Any
     steps: Annotated[list[str], lambda left, right: left + right]
 
@@ -77,6 +79,41 @@ def _records_for_document(document: dict[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
+# 超大材料（如整份年报 PDF）可解析出上万条记录。全量送本地脱敏模型
+# 会串行数百次 LLM 调用，让评估等待数十分钟。按页保留代表性记录：
+# 每页保留头部、尾部与均匀采样，覆盖“页首身份信息 + 页尾财务摘要”。
+# 被裁剪的记录不会进入脱敏与检索环节，因此也不会外发，安全边界不变。
+RECORD_BUDGET_PER_DOCUMENT = 900
+RECORD_BUDGET_PER_PAGE = 32
+
+
+def _budgeted_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(records) <= RECORD_BUDGET_PER_DOCUMENT:
+        return records
+    pages: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        page = str(record.get('start_page') or record.get('page') or 0)
+        pages.setdefault(page, []).append(record)
+    per_page_limit = max(12, min(RECORD_BUDGET_PER_PAGE, RECORD_BUDGET_PER_DOCUMENT // max(1, len(pages))))
+    out: list[dict[str, Any]] = []
+    for items in pages.values():
+        if len(items) <= per_page_limit:
+            out.extend(items)
+            continue
+        keep: list[dict[str, Any]] = []
+        head = items[:3]
+        tail = items[-3:]
+        keep.extend(head)
+        step = (len(items) - 6) / (per_page_limit - 6) if per_page_limit > 6 else len(items)
+        for k in range(per_page_limit - 6):
+            index = 3 + int(round(k * step))
+            if index < len(items) - 3 and items[index] not in keep:
+                keep.append(items[index])
+        keep.extend(tail)
+        out.extend(keep)
+    return out[:RECORD_BUDGET_PER_DOCUMENT]
+
+
 def node_production_materials(state: CreditState) -> CreditState:
     """Production only parses source files; it does not infer financial facts."""
     records_by_document: dict[str, list[dict[str, Any]]] = {}
@@ -84,7 +121,7 @@ def node_production_materials(state: CreditState) -> CreditState:
     for document in state.get('documents') or []:
         document_id = str(document.get('document_id') or '')
         try:
-            records_by_document[document_id] = _records_for_document(document)
+            records_by_document[document_id] = _budgeted_records(_records_for_document(document))
         except Exception as exc:
             parse_errors.append({'document_id': document_id, 'error': str(exc)[:300]})
     state['records_by_document'] = records_by_document
@@ -132,6 +169,31 @@ def node_react_audit(state: CreditState) -> CreditState:
                                   for item in audit.get('material_requests') or []]
     state['steps'] = [f"Agent 审查：状态 {audit.get('status')}；已核验事实 {len(audit.get('claims') or [])} 条；"
                       f"处理步骤 {len(audit.get('trace') or [])}"]
+    return state
+
+
+def node_external_due_diligence(state: CreditState) -> CreditState:
+    """Add public-web signals as reviewable evidence, never as financial facts."""
+    result = run_external_due_diligence(state.get('case') or {}, on_event=state.get('on_event'))
+    state['external_due_diligence'] = result
+    external_evidence = [
+        {'category': 'external_due_diligence', 'field': str(item.get('source_type') or 'public_web'),
+         'value': item, 'source_ref': str(item.get('url') or item.get('title') or ''), 'confidence': 0.6}
+        for item in result.get('sources') or []
+    ]
+    state['evidence'] = [*(state.get('evidence') or []), *external_evidence]
+    findings = result.get('findings') or []
+    if findings:
+        state['missing_materials'] = [*(state.get('missing_materials') or []), {
+            'type': 'external_due_diligence', 'title': '核验 Exa 公开风险线索',
+            'detail': f'发现 {len(findings)} 条公开风险线索，须由信用审核专员逐条确认主体匹配和处理结论。',
+        }]
+    elif result.get('status') in {'unavailable', 'rate_limited'}:
+        state['missing_materials'] = [*(state.get('missing_materials') or []), {
+            'type': 'external_due_diligence', 'title': 'Exa 公开尽调暂不可用',
+            'detail': '未能获得外部公开信息结果；请人工核验或稍后重试，不能将此状态解读为客户无风险。',
+        }]
+    state['steps'] = [f"外部公开尽调：{result.get('message') or result.get('status')}"]
     return state
 
 
@@ -223,6 +285,7 @@ def node_report(state: CreditState) -> CreditState:
         'model_version': state['model']['version'], 'policy_version': 'dongjiang-credit-policy-v1',
         'created_at': state['case'].get('updated_at'), 'materials': [{key: value for key, value in document.items() if key != 'stored_path'} for document in state.get('documents') or []],
         'facts': state.get('facts') or {}, 'assessment': state['assessment'], 'narrative': state['narrative'],
+        'external_due_diligence': state.get('external_due_diligence') or {},
         'missing_materials': state.get('missing_materials') or [], 'steps': state.get('steps') or [],
         'audit_runtime': state.get('react_audit') or {'status': 'execution_failed', 'reason': 'react_audit_missing'},
         # An audit report is always labelled with the sole runtime available to
@@ -236,12 +299,13 @@ def node_report(state: CreditState) -> CreditState:
 def build_credit_graph():
     """Production ReAct graph: no legacy matcher participates in facts."""
     graph = StateGraph(CreditState)
-    for name, handler in [('production_materials', node_production_materials), ('react_audit', node_react_audit),
+    for name, handler in [('production_materials', node_production_materials), ('react_audit', node_react_audit), ('external_due_diligence', node_external_due_diligence),
                           ('production_measure', node_production_measure), ('explain', node_explain), ('report', node_report)]:
         graph.add_node(name, handler)
     graph.add_edge(START, 'production_materials')
     graph.add_edge('production_materials', 'react_audit')
-    graph.add_edge('react_audit', 'production_measure')
+    graph.add_edge('react_audit', 'external_due_diligence')
+    graph.add_edge('external_due_diligence', 'production_measure')
     graph.add_edge('production_measure', 'explain')
     graph.add_edge('explain', 'report')
     graph.add_edge('report', END)

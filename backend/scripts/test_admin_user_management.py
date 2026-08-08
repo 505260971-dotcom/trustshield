@@ -28,6 +28,29 @@ def login(client: TestClient, username: str, password: str) -> dict[str, str]:
 def main():
     with TestClient(app) as client:
         admin = login(client, 'admin', 'AdminPassword2026!')
+        me = client.get('/api/auth/me', headers=admin)
+        assert me.status_code == 200 and '*' not in me.json()['permissions']
+        assert 'admin:users' in me.json()['permissions'] and 'credit:create' not in me.json()['permissions']
+        # A system administrator can manage identities but is not a business
+        # approver or credit-case creator.
+        assert client.post('/api/credit/cases', headers=admin, json={'customer_name': '越权拦截测试'}).status_code == 403
+        for username, display_name, role, password in [
+            ('rule_reviewer', '风险条款起草专员', 'reviewer', 'ReviewerPass2026!'),
+            ('rule_director', '风险条款发布主管', 'director', 'DirectorPass2026!'),
+            ('final_approver', '集团财务总监', 'final_approver', 'FinalPass2026!'),
+        ]:
+            created_role = client.post('/api/admin/users', headers=admin, json={
+                'username': username, 'display_name': display_name, 'role': role, 'password': password,
+            })
+            assert created_role.status_code == 200, created_role.text
+        reviewer_headers = login(client, 'rule_reviewer', 'ReviewerPass2026!')
+        director_headers = login(client, 'rule_director', 'DirectorPass2026!')
+        final_headers = login(client, 'final_approver', 'FinalPass2026!')
+        draft = client.post('/api/admin/rule-versions', headers=reviewer_headers)
+        assert draft.status_code == 200, draft.text
+        assert client.post('/api/admin/rule-versions/' + draft.json()['version'] + '/publish', headers=director_headers).status_code == 200
+        assert client.post('/api/admin/rule-versions', headers=final_headers).status_code == 403
+        assert client.get('/api/admin/credit-route-versions', headers=final_headers).status_code == 403
         created = client.post('/api/admin/users', headers=admin, json={
             'username': 'risk_reviewer', 'display_name': '风险审核专员',
             'role': 'reviewer', 'password': 'ReviewerPass2026!',
@@ -53,7 +76,7 @@ def main():
         admin_id = client.get('/api/auth/me', headers=admin).json()['user']['id']
         assert client.delete('/api/admin/users/' + admin_id, headers=admin).status_code == 400
         assert client.patch('/api/admin/users/' + admin_id, headers=admin, json={'role': 'reviewer'}).status_code == 400
-    print('administrator user CRUD, password reset and deletion safeguards passed')
+    print('role split, rule dual-control, administrator CRUD and account safeguards passed')
 
 
 if __name__ == '__main__':

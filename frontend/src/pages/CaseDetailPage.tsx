@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Badge, Button, Card, Collapse, Descriptions, Empty, List, Modal, Select, Space, Spin, Steps, Statistic, Tabs, Tag, Typography, Upload, message } from 'antd'
+import { Alert, Badge, Button, Card, Collapse, Descriptions, Empty, Input, List, Modal, Select, Space, Spin, Steps, Statistic, Tabs, Tag, Typography, Upload, message } from 'antd'
 import { ArrowLeftOutlined, CheckCircleOutlined, ClockCircleOutlined, ExclamationCircleOutlined, FileTextOutlined, SafetyCertificateOutlined, SendOutlined, UploadOutlined } from '@ant-design/icons'
 import { api } from '../services/api'
 import { useAuth } from '../context/AuthContext'
@@ -17,7 +17,7 @@ const stageOrder=['draft','awaiting_credit','ai_review','legal_review','awaiting
 const stageLabel:Record<string,string>={draft:'待上传合同',awaiting_credit:'等待有效信用审核',ai_review:'系统审查中',legal_review:'信用审核专员复核',awaiting_business:'待业务补充材料',approval:'待主管审批',final_approval:'待最终审批',ready_to_sign:'审查完成，可进入签约',archived:'已签约归档'}
 type ReviewGate={report:Report;findings:any[];approvals:any[];material_requests:any[]}
 
-function roleLabel(role?:string){return ({business:'业务申请人',reviewer:'信用审核专员',director:'财务审批主管',admin:'集团财务总监（最终审批人）'} as Record<string,string>)[role||'']||'当前角色'}
+function roleLabel(role?:string){return ({business:'业务申请人',reviewer:'信用审核专员',director:'财务审批主管',final_approver:'集团财务总监（最终审批人）',admin:'系统管理员'} as Record<string,string>)[role||'']||'当前角色'}
 
 export default function CaseDetailPage({caseId,onBack,onCreateCredit}:{caseId:string;onBack:()=>void;onCreateCredit?:(customerName:string)=>void}){
   const {user}=useAuth()
@@ -52,6 +52,7 @@ export default function CaseDetailPage({caseId,onBack,onCreateCredit}:{caseId:st
   },[activeJob])
 
   const act=async(action:string,note='')=>{setActionBusy(true);try{await api.caseAction(caseId,action,{note});message.success('案件状态已更新');await load()}catch(e:any){message.error(e.message)}finally{setActionBusy(false)}}
+  const rejectContract=()=>{let note='';Modal.confirm({title:'驳回本合同及当前放行申请？',content:<Input.TextArea autoFocus rows={4} placeholder="必填：说明驳回原因，信用审核专员和业务人员将据此处理。" onChange={event=>{note=event.target.value}}/>,okText:'确认驳回',okButtonProps:{danger:true},cancelText:'取消',onOk:async()=>{if(!note.trim())throw new Error('请填写驳回原因');await act('reject',note)}})}
   const uploadRevision=async(file:File)=>{
     if(!item?.credit_case_id){message.error('案件缺少有效的信用审核版本，不能上传复审');return false}
     try{
@@ -69,7 +70,7 @@ export default function CaseDetailPage({caseId,onBack,onCreateCredit}:{caseId:st
   if(!item)return <Empty description="案件不存在"/>
 
   const stageIndex=Math.max(0,stageOrder.indexOf(item.current_stage))
-  const canReviewer=user?.role==='reviewer'; const canDirector=user?.role==='director'; const canFinal=user?.role==='admin'; const canBusiness=user?.role==='business'
+  const canReviewer=user?.role==='reviewer'; const canDirector=user?.role==='director'; const canFinal=user?.role==='final_approver'; const canBusiness=user?.role==='business'
   const findings=gate?.findings||[]
   const creditBlockers=findings.filter(f=>String(f.rule_id||'').startsWith('CREDIT_'))
   const pendingFindings=findings.filter(f=>!String(f.rule_id||'').startsWith('CREDIT_')&&f.action_status==='pending').length
@@ -80,6 +81,17 @@ export default function CaseDetailPage({caseId,onBack,onCreateCredit}:{caseId:st
     ? {state:'pending' as const,label:'放行条件暂不可用',color:'orange' as const,action:'刷新或重新打开案件',description:'当前版本的审查结果暂时无法读取，请刷新页面后再决定是否推进流程。'}
     : gateStateInfo({hasCredit:Boolean(item.credit_case_id),hasDocument:Boolean(currentDocument),gateCount,stage:item.current_stage,loading:gateLoading||Boolean(activeJob&&!gate)})
   const gateCountWithPrerequisite=gateCount+(!item.credit_case_id||(!currentDocument&&item.current_stage!=='archived')?1:0)
+  // 差异化审批路径：由后端按“合同金额 + 已有敞口 vs 信审额度、风险处置
+  // 与例外审批状态”自动判定，主管/审核员的放行按钮按档位唯一渲染。
+  const routeSnapshot = item.route_snapshot || null
+  const routeTier = routeSnapshot?.tier || ''
+  const routeMeta = !routeSnapshot
+    ? null
+    : routeTier === 'fast'
+      ? { tag: <Tag color="green">快速审批路径</Tag>, title: '本版本满足快速放行条件，主管批准后即可签约', alert: 'success' as const }
+      : routeTier === 'standard'
+        ? { tag: <Tag color="orange">需总监终审</Tag>, title: '本版本需集团财务总监最终审批', alert: 'warning' as const }
+        : { tag: <Tag color="red">暂不能放行</Tag>, title: '本版本存在阻断事项，先修订合同或更新信用审核', alert: 'error' as const }
   const isCurrentVersion=currentDocument?.job_id===activeJob
   const actionHint=!item.credit_case_id
     ? '该案件尚未绑定已生效的信用审核版本，暂不能上传合同。请先完成客户信用审核，再回到本案件继续推进。'
@@ -104,27 +116,33 @@ export default function CaseDetailPage({caseId,onBack,onCreateCredit}:{caseId:st
     : canBusiness && ['draft','awaiting_business'].includes(item.current_stage) && item.credit_case_id
     ? <Upload showUploadList={false} beforeUpload={file => uploadRevision(file as File)} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.bmp"><Button type="primary" icon={<UploadOutlined/>}>{item.documents.length?'上传修订合同':'上传主合同'}</Button></Upload>
     : canReviewer && item.current_stage === 'legal_review'
-      ? gateCount ? <Button type="primary" onClick={() => openReport(activeJob)}>处理风险与放行条件（{gateCount}）</Button> : <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('ready_for_signing','信用审核专员复核完成，可进入签约交付。')}>确认可签约</Button>
+      ? gateCount ? <Button type="primary" onClick={() => openReport(activeJob)}>处理风险与放行条件（{gateCount}）</Button> : routeTier === 'fast'
+        ? <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('ready_for_signing','快速路径：合同金额与既有敞口均在已生效信用边界内，风险、材料和例外均已闭环。')}>确认可签约（快速路径）</Button>
+        : <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('submit_approval','信用审核专员复核完成，提交财务审批主管复核。')}>提交主管复核</Button>
       : canDirector && item.current_stage === 'approval'
-        ? <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('approve_for_signing','主管审批通过，可进入签约交付。')}>主管批准可签约</Button>
-        : canFinal && item.current_stage === 'approval'
-          ? <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('approve_for_signing','最终审批通过，可进入签约交付。')}>批准可签约</Button>
-          : canFinal && item.current_stage === 'final_approval'
+        ? routeTier === 'blocked'
+          ? <Button type="primary" icon={<ExclamationCircleOutlined/>} onClick={() => openReport(activeJob)}>处理阻断事项</Button>
+          : routeSnapshot?.requires_final
+            ? <Button type="primary" loading={actionBusy} icon={<SendOutlined/>} onClick={() => act('escalate_final','主管复核后提交集团财务总监最终审批。')}>提交最终审批</Button>
+            : <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('approve_for_signing','主管审批通过，可进入签约交付。')}>主管批准可签约</Button>
+        : canFinal && item.current_stage === 'final_approval'
             ? <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('final_approve_for_signing','集团财务总监最终审批通过，可进入签约交付。')}>最终批准可签约</Button>
-            : canReviewer && item.current_stage === 'ready_to_sign'
-              ? <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('archive','合同已签署，归档案件。')}>确认已签署并归档</Button>
+            : canBusiness && item.current_stage === 'ready_to_sign'
+              ? <Button type="primary" loading={actionBusy} icon={<CheckCircleOutlined/>} onClick={() => act('archive','业务申请人确认合同已完成签署，归档案件。')}>确认已签署并归档</Button>
               : activeJob ? <Button type="primary" onClick={() => openReport(activeJob)}>查看当前审查结果</Button> : null
   const secondaryActions = <Space wrap>
     {canReviewer && item.current_stage === 'legal_review' && <Button loading={actionBusy} onClick={() => act('request_material','请补充合同背景、报价或对方修改说明。')}>退回业务补充材料</Button>}
-    {canReviewer && item.current_stage === 'legal_review' && <Button loading={actionBusy} icon={<SendOutlined/>} onClick={() => act('submit_approval','合同风险需要分级审批。')}>提交主管审批</Button>}
-    {canDirector && item.current_stage === 'approval' && <><Button loading={actionBusy} onClick={() => act('return_to_reviewer','请根据主管意见修改审查结论。')}>退回审核员</Button><Button loading={actionBusy} onClick={() => act('return_to_business','请补充材料或上传修订合同。')}>退回业务补充材料</Button><Button loading={actionBusy} onClick={() => act('escalate_final','主管复核后提交集团财务总监最终审批。')}>提交最终审批</Button></>}
-    {canFinal && ['approval','final_approval'].includes(item.current_stage) && <><Button loading={actionBusy} onClick={() => act('return_to_reviewer','请根据审批意见修改审查结论。')}>退回审核员</Button><Button loading={actionBusy} onClick={() => act('return_to_business','请补充材料或上传修订合同。')}>退回业务补充材料</Button></>}
+    {canDirector && item.current_stage === 'approval' && <><Button loading={actionBusy} onClick={() => act('return_to_reviewer','请根据主管意见重新核对合同条款、授信条件和已纳入的外部公开信息。')}>退回审核专员</Button><Button loading={actionBusy} onClick={() => act('return_to_business','请补充材料或上传修订合同。')}>退回业务补充材料</Button><Button danger loading={actionBusy} onClick={rejectContract}>驳回合同</Button></>}
+    {canFinal && item.current_stage === 'final_approval' && <><Button loading={actionBusy} onClick={() => act('return_to_reviewer','请根据最终审批意见重新核对合同条款、授信条件和已纳入的外部公开信息。')}>退回审核专员</Button><Button loading={actionBusy} onClick={() => act('return_to_business','请补充材料或上传修订合同。')}>退回业务补充材料</Button><Button danger loading={actionBusy} onClick={rejectContract}>驳回合同</Button></>}
     {canBusiness && item.credit_case_id && item.documents.length>0 && item.current_stage !== 'archived' && item.current_stage !== 'cancelled' && item.current_stage !== 'awaiting_business' && <Upload showUploadList={false} beforeUpload={file => uploadRevision(file as File)} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.bmp"><Button icon={<UploadOutlined/>}>上传修订合同</Button></Upload>}
   </Space>
 
   const documentTab=<>
     {activeJob&&item.current_stage==='ai_review'&&<ContractReviewWorkspace jobId={activeJob} onStatusChange={status=>{if(status.status!=='running')load()}}/>}
     <Card className={`case-gate-card gate-state-${gateInfo.state}`} size="small" title={<Space><SafetyCertificateOutlined/>当前版本放行条件检查 {currentDocument&&<Tag color="blue">{currentDocument.version_label}</Tag>}</Space>} extra={gateLoading?<Spin size="small"/>:<Badge status={gateInfo.state==='blocked'?'error':gateInfo.state==='passed'?'success':'warning'} text={gateInfo.state==='passed'?'当前版本已满足放行条件':gateInfo.label}/> }>
+      {routeMeta && <Alert className="case-route-banner" showIcon type={routeMeta.alert} style={{marginBottom:14}}
+        message={<Space wrap>{routeMeta.tag}<Text strong>{routeMeta.title}</Text></Space>}
+        description={<div className="case-route-reasons">{(routeSnapshot?.reasons||[]).map((reason,index)=><div key={index}>{reason}</div>)}</div>} />}
       <Alert showIcon type={gateInfo.state==='blocked'?'error':gateInfo.state==='passed'?'success':'warning'} message={actionHint} style={{marginBottom:14}}/>
       {item.credit_binding?.stale&&<Alert showIcon type="warning" style={{marginBottom:14}} message={`绑定的信用审核版本 V${item.credit_binding.version} 已不是当前生效版本`} description={<><Text>本案件当时的审查依据仍保留该版本的快照，不会被新版本悄悄改写。</Text><br/><Text type="secondary">{item.credit_binding.reasons.join('；')}。请在签约/导出前上传修订合同，基于当前生效版本重新复审。</Text></>}/>}
       <div className="case-gate-grid">
@@ -137,12 +155,19 @@ export default function CaseDetailPage({caseId,onBack,onCreateCredit}:{caseId:st
     {activeJob&&<div className="case-gate-actions"><Button type="primary" onClick={()=>openReport(activeJob)}>打开当前版本审查报告</Button>{gateError&&<Button onClick={()=>window.location.reload()}>重新检查放行条件</Button>}{canBusiness&&item.current_stage!=='archived'&&item.current_stage!=='cancelled'&&<Upload showUploadList={false} beforeUpload={file=>uploadRevision(file as File)} accept=".docx,.pdf,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.bmp"><Button icon={<UploadOutlined/>}>上传新的修订版本</Button></Upload>}</div>}
     </Card>
 
+    {gate?.report?.credit_decision&&<Card size="small" style={{marginBottom:12}} title="本合同引用的联网公开信息处理结果">
+      <Alert type="info" showIcon style={{marginBottom:10}} message={`信用审核专员已确认 V${gate.report.credit_decision.version}`} description="这里只显示审核专员明确纳入本次信用判断的公开信息；合同审批人可据此作出通过、退回或驳回合同决定，无需重复审批信用审核版本。"/>
+      {(gate.report.credit_decision.external_reviews||[]).length
+        ? <List size="small" dataSource={gate.report.credit_decision.external_reviews||[]} renderItem={(review:any)=><List.Item><List.Item.Meta title={<Space wrap><Tag color={review.severity==='high'?'red':'orange'}>{review.code||'外部线索'}</Tag><Text strong>{review.title||'未命名公开线索'}</Text></Space>} description={<Space direction="vertical" size={2}><Text>{review.note||'审核专员已纳入本次信用判断。'}</Text>{review.source_url&&<a href={review.source_url} target="_blank" rel="noreferrer">打开公开来源</a>}</Space>}/></List.Item>}/>
+        : <Text type="secondary">本信用审核未纳入联网公开风险线索。</Text>}
+    </Card>}
+
     <Card className="case-documents-card" size="small" title="文件与版本">
       <Alert type="info" showIcon style={{marginBottom:12}} message="新修订版通过审查后会成为当前版本；历史版本仅用于对比和审计，不会影响当前版本的签约放行条件。"/>
       <List dataSource={item.documents} locale={{emptyText:'尚未上传合同文件'}} renderItem={doc=><List.Item actions={[doc.job_id?<Button key="report" size="small" type="link" onClick={()=>openReport(doc.job_id)}>查看审查</Button>:null].filter(Boolean)}><List.Item.Meta avatar={<FileTextOutlined style={{fontSize:20,color:'#1677ff'}}/>} title={<Space wrap><Text strong>{doc.original_name}</Text><Tag>{doc.version_label}</Tag>{doc.is_current_version?<Tag color="blue">当前版本</Tag>:<Tag>历史版本</Tag>}<Tag>{doc.document_role}</Tag></Space>} description={<>{doc.review_status==='done'?<Tag color="green">审查完成</Tag>:doc.review_status?<Tag color="processing">{doc.review_status}</Tag>:<Tag>待审查</Tag>}　{doc.overall_level||'等待审查结果'}<br/><Text type="secondary">{fmtTime(doc.created_at)}</Text></>}/></List.Item>}/>
     </Card>
 
-    {activeJob && isCurrentVersion && (
+    {(canReviewer||canFinal) && activeJob && isCurrentVersion && (
       <Collapse className="case-technical-collapse" items={[{key:'workflow',label:'Agent 运行记录与技术详情',children:<CaseWorkflowPanel jobId={activeJob}/>}]} />
     )}
   </>

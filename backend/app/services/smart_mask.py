@@ -1,5 +1,6 @@
 import re, json
 import httpx
+from typing import Any
 from .llm import get_mask_llm, invoke_mask, estimate_tokens, clip_text_to_tokens
 from ..config import (LOCAL_CONTEXT_TOKENS, MASK_LLM_API_BASE, MASK_LLM_MODEL,
                       MASK_LLM_NATIVE_OLLAMA, MASK_LLM_THINK, MASK_LLM_MAX_OUTPUT, MASK_LLM_DEEP_SCAN)
@@ -141,17 +142,49 @@ def llm_mask_batch(texts, *, system_prompt: str | None = None, force: bool = Fal
     if current:
         batches.append(current)
 
-    for chunk in batches:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _mask_one_batch(chunk: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
         user = json.dumps(chunk, ensure_ascii=False)
         try:
             data = _mask_llm_json(sys, user, output_tokens)
-            for it in data.get('items', []):
-                results[int(it.get('idx'))] = it.get('entities', []) or []
+            return {int(it.get('idx')): (it.get('entities') or []) for it in data.get('items', [])}
         except Exception:
             if strict:
                 raise
+            return {}
+
+    # Batches are independent one-shot LLM calls, so they can run concurrently.
+    # A large financial statement otherwise serializes hundreds of calls and
+    # stalls the review for tens of minutes.  The model provider rate-limits
+    # per key, so cap the pool at a conservative width.
+    results.update(_mask_batch_result(batches, _mask_one_batch))
     return results
 
+
+def _mask_batch_result(batches: list[list[dict[str, Any]]], worker) -> dict[int, list[dict[str, Any]]]:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import BoundedSemaphore
+
+    # 并发调用同一 API Key 时保守限流：最多 6 路并行。
+    semaphore = BoundedSemaphore(6)
+    collected: dict[int, list[dict[str, Any]]] = {}
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = []
+        for chunk in batches:
+            semaphore.acquire()
+            futures.append(pool.submit(_run_guarded, worker, chunk, semaphore))
+        for future in futures:
+            for key, value in future.result().items():
+                collected[int(key)] = value
+    return collected
+
+
+def _run_guarded(worker, chunk, semaphore):
+    try:
+        return worker(chunk)
+    finally:
+        semaphore.release()
 def mask_clauses_smart(clauses):
     """批量智能脱敏:正则兜底(零成本)+ 本地 8B 批量识别(合并多条款)。
     返回 masked_clauses + 全局映射(placeholder->原文)。"""

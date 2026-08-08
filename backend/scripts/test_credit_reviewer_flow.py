@@ -37,6 +37,7 @@ def main():
     admin = store.authenticate('admin', 'AdminPassword2026!')
     reviewer = store.create_user('reviewer', '信用审核专员', 'reviewer', 'ReviewerPassword2026!')
     director = store.create_user('director', '财务审批主管', 'director', 'DirectorPassword2026!')
+    final = store.create_user('final', '集团财务总监', 'final_approver', 'FinalPassword2026!')
     business = store.create_user('business', '业务申请人', 'business', 'BusinessPassword2026!')
 
     case = store.create_credit_case('人工修订测试客户', conditions(), '测试人工修订', reviewer, 'TKP')
@@ -54,43 +55,20 @@ def main():
     assert reviewed['review_mode'] == 'reviewer_adjusted'
     assert reviewed['conditions']['max_credit_amount'] == 800_000
     assert reviewed['assessment_snapshot']['recommendation']['max_credit_amount'] == 1_000_000
-    store.submit_credit_case(case['case_id'], reviewer)
-    returned = store.decide_credit_case(case['case_id'], 'returned_to_reviewer', '请补充额度调整的回款证据。', director)
-    assert returned['status'] == 'returned_to_reviewer'
-    assert returned['return_target'] == 'reviewer'
-    assert '回款证据' in returned['return_note']
-    assert any(item['source_type'] == 'credit' and item['case_id'] == case['case_id'] for item in store.my_work_items(reviewer))
-    store.record_credit_reviewer_decision(case['case_id'], assessment, final_terms, '已补充客户回款记录并维持保守条件。', 'reviewer_adjusted', reviewer, 'TKP')
-    store.submit_credit_case(case['case_id'], reviewer)
-    assert store.decide_credit_case(case['case_id'], 'approved', '复核通过', director)['status'] == 'pending_final'
-    assert store.decide_credit_case(case['case_id'], 'approved', '最终批准', admin)['status'] == 'approved'
+    approved = store.submit_credit_case(case['case_id'], reviewer)
+    assert approved['status'] == 'approved'
+    assert approved['decided_by'] == reviewer['id']
+    assert approved['route_snapshot']['requires_final'] is False
+    try:
+        store.decide_credit_case(case['case_id'], 'approved', '不应再进入重复信审审批', director)
+        raise AssertionError('已由信用审核专员确认生效的版本不应再进入信审主管审批')
+    except ValueError as exc:
+        assert '待最终审批' in str(exc) or '仅待最终审批' in str(exc)
 
-    # Published credit-route versions control whether a supervisor decision
-    # ends the case or must be escalated.  The route snapshot stays on the
-    # case, so a later policy publication cannot rewrite this decision path.
-    route = store.create_credit_route_draft(admin)
-    direct_config = {**route['config'], 'final_threshold_amount': 10_000_000, 'final_threshold_payment_days': 365,
-                     'final_threshold_prepayment_ratio': 0, 'final_on_manual_override': False,
-                     'final_on_acceptance_bill': False, 'final_on_vmi_jit': False}
-    store.update_credit_route_version(route['version'], direct_config, admin)
-    published_route = store.publish_credit_route_version(route['version'], admin)
-    direct_case = store.create_credit_case('主管结案路由测试客户', conditions(500_000, 30), '测试可由主管结案的路由', reviewer, 'TKP')
+    direct_case = store.create_credit_case('审核专员直接生效测试客户', conditions(500_000, 30), '测试直接生效', reviewer, 'TKP')
     direct_assessment = ready_assessment(direct_case['case_id'], reviewer, conditions(500_000, 30))
     store.record_credit_reviewer_decision(direct_case['case_id'], direct_assessment, conditions(500_000, 30), '', 'agent_recommended', reviewer, 'TKP')
-    submitted_direct = store.submit_credit_case(direct_case['case_id'], reviewer)
-    assert submitted_direct['route_snapshot']['version'] == published_route['version']
-    assert submitted_direct['route_snapshot']['requires_final'] is False
-    assert store.decide_credit_case(direct_case['case_id'], 'approved', '主管按路由批准', director)['status'] == 'approved'
-
-    material_case = store.create_credit_case('补材料闭环测试客户', conditions(), '业务申请补材料闭环', business, 'TKP')
-    material_assessment = ready_assessment(material_case['case_id'], reviewer, conditions())
-    store.record_credit_reviewer_decision(material_case['case_id'], material_assessment, conditions(), '', 'agent_recommended', reviewer, 'TKP')
-    store.submit_credit_case(material_case['case_id'], reviewer)
-    returned = store.decide_credit_case(material_case['case_id'], 'returned_to_business', '请补充最近一期财报和第三方信用报告。', director)
-    assert returned['status'] == 'returned_to_business'
-    assert any(item['source_type'] == 'credit' and item['case_id'] == material_case['case_id'] for item in store.my_work_items(business))
-    resubmitted = store.resubmit_credit_case(material_case['case_id'], business)
-    assert resubmitted['status'] == 'draft'
+    assert store.submit_credit_case(direct_case['case_id'], reviewer)['status'] == 'approved'
 
     fallback = store.create_credit_case('Agent异常测试客户', conditions(), '测试人工兜底', reviewer, 'TKP')
     failed_task = store.start_credit_assessment(fallback['case_id'], reviewer)

@@ -4,9 +4,9 @@
 RULES = [
     {'id': 'R01', 'dim': 'pay_before_delivery', 'baseline': '模具交付前，公司必须收到不少于货款60%的款项', 'check': '模具交付前收款比例低于60%即为风险', 'applies_to':['模塑一体','TKM','TKP'], 'approval_role':'', 'template':'模具交付前，甲方应支付不少于对应货款的60%。'},
     {'id': 'R02', 'dim': 'pay_after_delivery_days', 'baseline': '模塑一体业务的收款期限不得超过发货后90天', 'check': '发货后收款账期超过90天即为风险', 'applies_to':['模塑一体'], 'approval_role':'', 'template':'甲方应于货物发出后90日内完成全部付款。'},
-    {'id': 'R03', 'dim': 'pay_method_acceptance', 'baseline': '付款方式为银行承兑汇票时须经集团财务总监批准', 'check': '出现银行承兑汇票且未经最终审批即风险', 'applies_to':['全部'], 'approval_role':'admin', 'template':'付款方式为银行承兑汇票的，须取得集团财务总监书面批准后方可生效。'},
-    {'id': 'R04', 'dim': 'joint_liability', 'baseline': '未经集团财务总监批准不可签订有连带责任条款的合同', 'check': '出现连带责任且未经最终审批即风险', 'applies_to':['全部'], 'approval_role':'admin', 'template':'删除连带责任约定；任何例外须取得集团财务总监书面批准。'},
-    {'id': 'R05', 'dim': 'exclusivity', 'baseline': '未经集团财务总监批准，不可签订含有排他性内容的合同', 'check': '出现排他或独家安排且未经最终审批即为风险', 'applies_to':['全部'], 'approval_role':'admin', 'template':'本合同不构成排他、独家或最惠合作安排；任何例外须取得集团财务总监书面批准。'},
+    {'id': 'R03', 'dim': 'pay_method_acceptance', 'baseline': '付款方式为银行承兑汇票时须经集团财务总监批准', 'check': '出现银行承兑汇票且未经最终审批即风险', 'applies_to':['全部'], 'approval_role':'final_approver', 'template':'付款方式为银行承兑汇票的，须取得集团财务总监书面批准后方可生效。'},
+    {'id': 'R04', 'dim': 'joint_liability', 'baseline': '未经集团财务总监批准不可签订有连带责任条款的合同', 'check': '出现连带责任且未经最终审批即风险', 'applies_to':['全部'], 'approval_role':'final_approver', 'template':'删除连带责任约定；任何例外须取得集团财务总监书面批准。'},
+    {'id': 'R05', 'dim': 'exclusivity', 'baseline': '未经集团财务总监批准，不可签订含有排他性内容的合同', 'check': '出现排他或独家安排且未经最终审批即为风险', 'applies_to':['全部'], 'approval_role':'final_approver', 'template':'本合同不构成排他、独家或最惠合作安排；任何例外须取得集团财务总监书面批准。'},
     {'id': 'R06', 'dim': 'cancel_order', 'baseline': '客户可无责任取消订单或预测的合同', 'check': '客户可无责取消订单/预测即风险提示', 'applies_to':['全部'], 'approval_role':'', 'template':'订单取消应提前书面通知，并赔偿已发生且不可转移的原料、生产及物流成本。'},
     {'id': 'R07', 'dim': 'warranty', 'baseline': '质保期应同时约定啤次和期限，并以先到者为准', 'check': '质保期只约定啤次或期限之一，或未约定以先到者为准，即为风险', 'applies_to':['全部'], 'approval_role':'', 'template':'质保期以交付后 X 个月或 Y 啤次先到者为准。'},
     {'id': 'R08', 'dim': 'warranty_replacement', 'baseline': '模塑一体业务中，替代品或替换品的质保期重新计算，或从终端成品时间起算', 'check': '替代品或替换品的质保期起算方式不符合要求即为风险', 'applies_to':['模塑一体'], 'approval_role':'', 'template':'替代品或替换品不重新起算质保期，除非双方另有书面约定。'},

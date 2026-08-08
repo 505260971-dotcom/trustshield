@@ -7,6 +7,8 @@ Desktop.ini
 .idea/
 .vscode/
 *.log
+~$*.pptx
+docs/03-演示与交付/信盾-路演PPT-v2-16x9.pptx
 
 # Python
 __pycache__/

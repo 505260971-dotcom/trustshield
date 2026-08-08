@@ -1,12 +1,12 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { AutoComplete, Badge, Button, Dropdown, Drawer, Layout, List, Menu, Modal, Space, Spin, Tag, Typography, type MenuProps } from 'antd'
+import { AutoComplete, Badge, Button, Dropdown, Layout, Menu, Modal, Space, Spin, Tag, Typography, type MenuProps } from 'antd'
 import {
-  ApartmentOutlined, BarChartOutlined, BookOutlined, CheckCircleOutlined, DashboardOutlined,
+  ApartmentOutlined, BarChartOutlined, CheckCircleOutlined, DashboardOutlined,
   FileAddOutlined, FolderOpenOutlined, ReloadOutlined, SafetyCertificateOutlined, SearchOutlined, SettingOutlined,
   TeamOutlined, UnorderedListOutlined,
 } from '@ant-design/icons'
 import { api } from './services/api'
-import type { CustomerWorkspace, HealthInfo, RuleItem } from './types'
+import type { CustomerWorkspace, HealthInfo } from './types'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { RoleProvider } from './context/RoleContext'
 import { approvalRoleLabel } from './components/common'
@@ -23,13 +23,12 @@ const CaseCenterPage = lazy(() => import('./pages/CaseCenterPage'))
 const CustomerWorkspacePage = lazy(() => import('./pages/CustomerWorkspacePage'))
 const CustomerProfilePage = lazy(() => import('./pages/CustomerProfilePage'))
 const ApprovalCenterPage = lazy(() => import('./pages/ApprovalCenterPage'))
-const BatchMatrixPage = lazy(() => import('./pages/BatchMatrixPage'))
-const KnowledgePage = lazy(() => import('./pages/KnowledgePage'))
+const RiskRulePage = lazy(() => import('./pages/RiskRulePage'))
 
 const { Sider, Header, Content } = Layout
 const { Title, Text } = Typography
-type RoleKey = 'business' | 'reviewer' | 'director' | 'admin'
-type Page = 'home' | 'customers' | 'customer' | 'credits' | 'credit' | 'contracts' | 'case' | 'new' | 'records' | 'approvals' | 'matrix' | 'knowledge' | 'admin' | 'settings'
+type RoleKey = 'business' | 'reviewer' | 'director' | 'final_approver' | 'admin'
+type Page = 'home' | 'customers' | 'customer' | 'credits' | 'credit' | 'contracts' | 'case' | 'new' | 'records' | 'approvals' | 'matrix' | 'admin' | 'settings'
 type Route = { page: Page; customerKey?: string; caseId?: string; creditId?: string; creditCreate?: boolean; creditNewCustomerKey?: string }
 
 function parseRoute(): Route {
@@ -45,7 +44,6 @@ function parseRoute(): Route {
   if (parts[0] === 'records') return { page: 'records' }
   if (parts[0] === 'approvals') return { page: 'approvals' }
   if (parts[0] === 'matrix') return { page: 'matrix' }
-  if (parts[0] === 'knowledge') return { page: 'knowledge' }
   if (parts[0] === 'admin') return { page: 'admin' }
   if (parts[0] === 'settings') return { page: 'settings' }
   return { page: 'home' }
@@ -54,15 +52,16 @@ function parseRoute(): Route {
 const routeTitle: Record<Page, string> = {
   home: '待我处理', customers: '客户工作台', customer: '客户档案', credits: '信用审核管理', credit: '客户信用审核',
   contracts: '合同审查', case: '合同案件', new: '发起合同审查', records: '我的记录', approvals: '审批中心',
-  matrix: '风险矩阵', knowledge: '条款知识库',
-  admin: '组织与规则', settings: '系统与集成',
+  matrix: '风险条款管理',
+  admin: '组织与权限', settings: '系统与集成',
 }
 
 const access: Record<RoleKey, Page[]> = {
   business: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'new', 'records'],
-  reviewer: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'matrix', 'knowledge', 'records'],
+  reviewer: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'matrix', 'records'],
   director: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'matrix', 'records', 'approvals'],
-  admin: ['home', 'customers', 'customer', 'credits', 'credit', 'contracts', 'case', 'matrix', 'knowledge', 'records', 'approvals', 'admin', 'settings'],
+  final_approver: ['home', 'customer', 'credit', 'case', 'records', 'approvals'],
+  admin: ['admin', 'settings'],
 }
 
 const activeMenuFor = (page: Page): string => {
@@ -74,8 +73,6 @@ function AppInner() {
   const { user, loading, logout } = useAuth()
   const [route, setRoute] = useState<Route>(parseRoute())
   const [health, setHealth] = useState<HealthInfo | null>(null)
-  const [rules, setRules] = useState<RuleItem[]>([])
-  const [rulesOpen, setRulesOpen] = useState(false)
   const [customerSearchOpen, setCustomerSearchOpen] = useState(false)
   const [customerSearch, setCustomerSearch] = useState('')
   const [customerOptions, setCustomerOptions] = useState<CustomerWorkspace[]>([])
@@ -91,33 +88,30 @@ function AppInner() {
     try { setHealth(await api.health()) } catch { setHealth({ ollama: false, llm: false } as HealthInfo) }
   }
   useEffect(() => {
-    if (user) { ping(); api.rules().then(result => setRules(result.rules)).catch(() => {}); api.customerWorkspaces().then(result => setCustomerOptions(result.items || [])).catch(() => {}) }
+    if (user) { ping(); api.customerWorkspaces().then(result => setCustomerOptions(result.items || [])).catch(() => {}) }
   }, [user])
   const role = (user?.role || 'business') as RoleKey
 
   const menu = useMemo<MenuProps['items']>(() => {
-    const homeLabel = ['director', 'admin'].includes(role) ? '待我决策' : '待我处理'
-    const base: MenuProps['items'] = [
+    const homeLabel = ['director', 'final_approver'].includes(role) ? '待我决策' : '待我处理'
+    const base: MenuProps['items'] = role === 'admin' ? [] : [
       { key: 'home', icon: <DashboardOutlined />, label: homeLabel },
-      { key: 'customers', icon: <TeamOutlined />, label: role === 'business' ? '客户与业务' : '客户工作台' },
+      ...(role === 'final_approver' ? [] : [{ key: 'customers', icon: <TeamOutlined />, label: role === 'business' ? '客户与业务' : '客户工作台' }]),
     ]
     if (role === 'business') base.push({ key: 'records', icon: <UnorderedListOutlined />, label: '我的申请' })
     if (role === 'reviewer') base.push(
       { key: 'credits', icon: <SafetyCertificateOutlined />, label: '信用审核管理' },
       { key: 'contracts', icon: <FolderOpenOutlined />, label: '合同审查' },
-      { key: 'matrix', icon: <BarChartOutlined />, label: '风险矩阵' },
-      { key: 'knowledge', icon: <BookOutlined />, label: '条款知识库' },
+      { key: 'matrix', icon: <BarChartOutlined />, label: '风险条款管理' },
       { key: 'records', icon: <CheckCircleOutlined />, label: '我的记录' },
     )
-    if (['director', 'admin'].includes(role)) base.push(
+    if (role === 'director') base.push({ key: 'matrix', icon: <BarChartOutlined />, label: '风险条款发布' })
+    if (['director', 'final_approver'].includes(role)) base.push(
       { key: 'approvals', icon: <ApartmentOutlined />, label: '审批中心' },
-      { key: 'matrix', icon: <BarChartOutlined />, label: '风险矩阵' },
       { key: 'records', icon: <CheckCircleOutlined />, label: '我的记录' },
     )
     if (role === 'admin') base.push(
-      { key: 'knowledge', icon: <BookOutlined />, label: '条款知识库' },
-      { type: 'divider' },
-      { key: 'admin', icon: <TeamOutlined />, label: '组织与规则' },
+      { key: 'admin', icon: <TeamOutlined />, label: '组织与权限' },
       { key: 'settings', icon: <SettingOutlined />, label: '系统与集成' },
     )
     return base
@@ -126,7 +120,8 @@ function AppInner() {
   if (loading) return <div className="boot"><Spin size="large" /></div>
   if (!user) return <Suspense fallback={<div className="boot"><Spin size="large" /></div>}><LoginPage /></Suspense>
 
-  const activeRoute = access[role].includes(route.page) ? route : { page: 'home' as Page }
+  const fallbackPage: Page = role === 'admin' ? 'admin' : role === 'final_approver' ? 'approvals' : 'home'
+  const activeRoute = access[role].includes(route.page) ? route : { page: fallbackPage }
   const canCreateContract = role === 'business'
   const canCreateCredit = ['business', 'reviewer'].includes(role)
   const openCase = (id: string) => go(`/cases/${id}`)
@@ -143,7 +138,9 @@ function AppInner() {
     : [{ key: 'credit', icon: <SafetyCertificateOutlined />, label: '新建信用审核版本' }]
 
   let page: ReactNode
-  if (activeRoute.page === 'home') {
+  if (activeRoute.page === 'home' && role === 'final_approver') {
+    page = <ApprovalCenterPage onOpenCase={openCase} onOpenCredit={openCredit} />
+  } else if (activeRoute.page === 'home') {
     page = <WorkbenchPage canCreateContract={canCreateContract} canCreateCredit={canCreateCredit} onCreateContract={createContractFor} onCreateCredit={createCreditFor} onOpenCase={openCase} onOpenCredit={openCredit} onNavigate={key => go(key.startsWith('/') ? key : `/${key}`)} />
   } else if (activeRoute.page === 'customers') {
     page = <CustomerWorkspacePage onOpenCustomer={openCustomer} onOpenCase={openCase} onOpenCredit={openCredit} onCreateContract={() => createContractFor()} onOpenCreditList={() => go('/credits')} canCreateContract={canCreateContract} />
@@ -162,13 +159,15 @@ function AppInner() {
   } else if (activeRoute.page === 'approvals') {
     page = <ApprovalCenterPage onOpenCase={openCase} onOpenCredit={openCredit} />
   } else if (activeRoute.page === 'matrix') {
-    page = <BatchMatrixPage />
-  } else if (activeRoute.page === 'knowledge') {
-    page = <KnowledgePage />
+    page = <RiskRulePage />
   } else if (activeRoute.page === 'settings' && role === 'admin') {
     page = <SettingsPage onSaved={ping} />
   } else if (activeRoute.page === 'admin' && role === 'admin') {
     page = <AdminPage />
+  } else if (role === 'admin') {
+    page = <AdminPage />
+  } else if (role === 'final_approver') {
+    page = <ApprovalCenterPage onOpenCase={openCase} onOpenCredit={openCredit} />
   } else {
     page = <WorkbenchPage canCreateContract={canCreateContract} canCreateCredit={canCreateCredit} onCreateContract={createContractFor} onCreateCredit={createCreditFor} onOpenCase={openCase} onOpenCredit={openCredit} onNavigate={key => go(key.startsWith('/') ? key : `/${key}`)} />
   }
@@ -186,18 +185,13 @@ function AppInner() {
         <Space wrap>
           <Tag color="blue">{approvalRoleLabel(role)}</Tag>
           <Text className="header-user">{user.display_name}</Text>
-          <Badge className="header-health" status={health?.llm ? 'success' : 'warning'} text={health?.llm ? 'Agent 审查服务正常' : 'Agent 审查服务未配置'} />
+          {role === 'admin' && <><Badge className="header-health" status={health?.llm ? 'success' : 'warning'} text={health?.llm ? 'Agent 审查服务正常' : 'Agent 审查服务未配置'} /><Button size="small" icon={<ReloadOutlined />} onClick={ping}>检查服务</Button></>}
           <Button size="small" icon={<SearchOutlined />} onClick={() => setCustomerSearchOpen(true)}>搜索</Button>
-          <Button size="small" icon={<ReloadOutlined />} onClick={ping}>检查服务</Button>
-          {role === 'reviewer' && <Button size="small" icon={<BookOutlined />} onClick={() => setRulesOpen(true)}>合同规则</Button>}
           <Button size="small" onClick={logout}>退出</Button>
         </Space>
       </Header>
       <Content className="workspace-content"><Suspense fallback={<div className="page-loading"><Spin /><Text type="secondary">正在加载工作区…</Text></div>}>{page}</Suspense></Content>
     </Layout>
-    <Drawer title="合同规则" open={rulesOpen} onClose={() => setRulesOpen(false)} width={620}>
-      <List dataSource={rules} renderItem={rule => <List.Item><List.Item.Meta avatar={<Tag color={rule.severity === 'high' ? 'red' : 'orange'}>{rule.id}</Tag>} title={<Text strong>{rule.baseline}</Text>} description={<><Text type="secondary">适用业务：{rule.applies_to?.join('、') || '全部'}　{rule.approval_role ? `例外审批：${approvalRoleLabel(rule.approval_role)}` : '无需例外审批'}</Text><br /><Text type="secondary">规则判定：{rule.check}</Text></>} /></List.Item>} />
-    </Drawer>
     <Modal title="查找客户" open={customerSearchOpen} onCancel={() => { setCustomerSearchOpen(false); setCustomerSearch('') }} footer={null} destroyOnClose>
       <AutoComplete style={{ width: '100%' }} value={customerSearch} options={customerOptions.map(customer => ({ value: customer.customer_name, label: <div className="customer-search-option"><b>{customer.customer_name}</b><span>{customer.latest_credit?.status === 'approved' ? `有效信用审核 V${customer.latest_credit.version}` : '暂无有效信用审核'} · 合同 ${customer.contracts.length} 份</span></div> }))} onChange={setCustomerSearch} filterOption={(input, option) => String(option?.value || '').toLowerCase().includes(input.toLowerCase())} onSelect={(_, option) => { const customer = customerOptions.find(item => item.customer_name === option.value); if (customer) { openCustomer(customer.customer_key); setCustomerSearchOpen(false); setCustomerSearch('') } }} placeholder="搜索客户名称" />
       {!customerOptions.length && <div className="page-loading"><Spin size="small" /><Text type="secondary">正在加载客户列表…</Text></div>}

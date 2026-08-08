@@ -9,7 +9,7 @@ export type Clause = { id: string; text: string; start_page: number; end_page: n
 export type Report = {
   filename: string; summary: Summary; contract_fields: any; clauses: Clause[]
   risks: Risk[]; review_hints?: Risk[]; steps: string[]; masked_entities: number
-  credit_decision?: { case_id:string; customer_name:string; version:number; conditions:CreditConditions; business_type?:string; exposure_snapshot_at_review?:CreditExposure['payload'] }
+  credit_decision?: { case_id:string; customer_name:string; version:number; conditions:CreditConditions; business_type?:string; exposure_snapshot_at_review?:CreditExposure['payload']; external_reviews?:ExternalReviewDecision[]; review_mode?:CreditCase['review_mode']; reviewer_note?:string; reviewed_at?:number }
   _job_id?: string
   review_scope?: { mode?:string; changed_clause_ids?:string[]; context_clause_ids?:string[]; total_clauses?:number }
 }
@@ -25,7 +25,6 @@ export type RuleItem = { id: string; dim: string; baseline: string; check: strin
 export type RuleVersion = { version:string; status:'draft'|'published'|'archived'; created_at:number; published_at?:number }
 export type ApprovalItem = { approval_id:string; finding_id:string; required_role:string; status:string; decision_note:string; created_at:number; decided_at?:number }
 export type MaterialRequest = { request_id:string; finding_id?:string; title:string; detail:string; status:string; created_at:number; resolved_at?:number; files?:{file_id:string;original_name:string;created_at:number}[] }
-export type KnowledgeItem = { case_id:string; rule_id:string; business_type?:string; source_clause:string; source_ref?:string; evidence?:string; suggested_text?:string; outcome:string; created_at:number }
 export type Stats = {
   total: number; done: number; blocked: number; high: number; mid: number
   clauses: number; rules_freq: Record<string, number>; my_open: number; unassigned: number; due_soon: number
@@ -35,7 +34,10 @@ export type HealthInfo = { ollama: boolean; llm: boolean }
 export type CreditConditions = { max_credit_amount:number; currency:string; max_payment_days:number; min_prepayment_ratio:number; allowed_payment_methods:string[]; allow_vmi_jit:boolean; valid_from?:number; valid_to?:number; available_credit_amount?:number; exposure_at_assessment?:number
   /** TKM（模具制作）三段式申请字段：首期款采购豁免、走模后尾款放账比例（%）、走模后尾款信用期（天）。TKP 不使用。 */
   first_payment_exempt?:boolean; tail_payment_ratio?:number; tail_payment_days?:number }
-export type CreditCase = { case_id:string; customer_name:string; version:number; status:'draft'|'returned_to_business'|'returned_to_reviewer'|'pending_director'|'pending_final'|'approved'|'rejected'|'superseded'; conditions:CreditConditions; request_note:string; business_type?:string; assigned_to?:string; director_note?:string; decision_note:string; return_note?:string; return_target?:'business'|'reviewer'|''; returned_by?:string; returned_at?:number; assessment_id?:string; assessment_snapshot?:any; route_version?:string; route_snapshot?:{version?:string;requires_final?:boolean;reasons?:string[];config?:any}; review_mode?:'agent_recommended'|'reviewer_adjusted'|'manual_override'|''; reviewer_note?:string; reviewed_by?:string; reviewed_at?:number; created_at:number; updated_at?:number; submitted_at?:number; director_at?:number; decided_at?:number }
+export type ExternalDueDiligenceFinding = { finding_id:string; code:string; severity:'high'|'mid'|'low'; title:string; summary:string; identity_confidence?:'strong'|'contextual'|'name_only'; status?:string; source?:{url?:string;title?:string;excerpt?:string;published_at?:string;source_type?:string} }
+export type ExternalDueDiligence = { provider?:string; status?:'disabled'|'skipped'|'unavailable'|'rate_limited'|'partial'|'review_required'|'no_verifiable_findings'; searched_at?:number; identity_confidence?:'strong'|'contextual'|'name_only'; message?:string; sources?:any[]; findings?:ExternalDueDiligenceFinding[] }
+export type ExternalReviewDecision = { finding_id:string; code?:string; severity?:string; title?:string; decision:'included'|'excluded'; note:string; source_url?:string }
+export type CreditCase = { case_id:string; customer_name:string; enterprise_code?:string; registered_location?:string; version:number; status:'draft'|'returned_to_business'|'returned_to_reviewer'|'pending_director'|'pending_final'|'approved'|'rejected'|'superseded'; conditions:CreditConditions; request_note:string; business_type?:string; assigned_to?:string; director_note?:string; decision_note:string; return_note?:string; return_target?:'business'|'reviewer'|''; returned_by?:string; returned_at?:number; assessment_id?:string; assessment_snapshot?:any; external_reviews?:ExternalReviewDecision[]; route_version?:string; route_snapshot?:{version?:string;requires_final?:boolean;reasons?:string[];config?:any}; review_mode?:'agent_recommended'|'reviewer_adjusted'|'manual_override'|''; reviewer_note?:string; reviewed_by?:string; reviewed_at?:number; created_at:number; updated_at?:number; submitted_at?:number; director_at?:number; decided_at?:number }
 export type CreditRouteVersion = {version:string;status:'draft'|'published'|'archived';config:{director_required:boolean;final_threshold_amount:number;final_threshold_payment_days:number;final_threshold_prepayment_ratio:number;final_on_manual_override:boolean;final_on_acceptance_bill:boolean;final_on_vmi_jit:boolean};created_at:number;published_at?:number}
 export type CreditDocument = { document_id:string; case_id:string; document_type:'financial_report'|'credit_report'|'trade_history'|'application'|'approval_evidence'|'other'; original_name:string; content_hash:string; uploaded_by?:string; created_at:number; text_status?:'ready'|'partial'|'failed'|'pending'; text_parser_version?:string; text_updated_at?:number; text_error?:string; text_record_count?:number }
 export type CreditSourceRecord = { text:string; source_ref:string; source_kind?:string; start_page?:number; end_page?:number; table_id?:string; row?:number; column?:number; bbox?:number[]|string }
@@ -72,8 +74,16 @@ export type WorkboxItem = { task_id:string; case_id:string; target_id:string; bu
 export type CaseDocument = { document_id:string; job_id?:string; original_name:string; document_role:string; version_label:string; review_status?:string; overall_level?:string; n_risks?:number; high?:number; mid?:number; low?:number; created_at:number; is_current_version?:boolean }
 export type CaseEvent = { event_id:string; event_type:string; message:string; actor_id?:string; created_at:number }
 export type CaseCenterItem = { case_id:string; customer_name:string; business_type:string; workflow_status:string; current_stage:string; priority:string; due_at?:number; request_note?:string; created_at:number; updated_at:number; requester_name?:string; assignee_name?:string; responsible_role?:string; responsible_name?:string; filename?:string; job_id?:string; overall_level?:string; document_count:number; open_tasks:number; credit_case_id?:string }
+export type CaseRouteSnapshot = {
+  /** fast=快速路径（主管批准即可签约，跳过总监）；standard=标准路径（总监终审）；blocked=阻断（先修订或更新信审） */
+  tier: 'fast' | 'standard' | 'blocked'
+  requires_final: boolean
+  reasons: string[]
+  based_on?: { contract_amount?:number|null; existing_exposure?:number|null; credit_limit?:number|null; projected_exposure?:number|null; utilization_pct?:number|null; currency?:string; credit_blocks?:number }
+}
 export type CaseCenterDetail = CaseCenterItem & { assigned_to?:string; documents:CaseDocument[]; tasks:WorkItem[]; events:CaseEvent[]
-  credit_binding?: { case_id:string; version:number; stale:boolean; reasons:string[] } | null }
+  credit_binding?: { case_id:string; version:number; stale:boolean; reasons:string[] } | null
+  route_snapshot?: CaseRouteSnapshot | null }
 export type CustomerWorkspaceContract = { case_id:string; customer_name:string; business_type:string; current_stage:string; priority:string; created_at:number; updated_at:number; credit_case_id?:string; filename?:string; open_tasks:number; current_task_type?:string; responsible_role:string; responsible_name:string }
 export type CustomerWorkspaceCredit = { case_id:string; customer_name:string; version:number; status:string; business_type?:string; created_at:number; updated_at:number; assigned_to?:string; assigned_name?:string; responsible_role:string; responsible_name:string }
 export type CustomerAction = { source_type:'credit'|'contract'; target_id:string; stage:string; responsible_role:string; responsible_name:string; updated_at:number; filename?:string }

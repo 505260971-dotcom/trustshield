@@ -72,6 +72,12 @@ DEFAULT_MODEL_RUNTIME_CONFIG: dict[str, Any] = {
     'embedding_base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'embedding_api_key': '', 'embedding_model': 'qwen3.7-text-embedding',
     'embedding_dimensions': 1024, 'embedding_timeout_seconds': 20,
     'embedding_candidate_limit': 36, 'embedding_document_token_budget': 1200,
+    # Exa's hosted MCP endpoint permits a bounded, no-key public-web lookup.
+    # It receives only corporate identity fields, never contract or financial
+    # source material.  The service may rate-limit anonymous use, so this is
+    # deliberately an assistive evidence layer rather than a scoring provider.
+    'external_due_diligence_enabled': True, 'external_due_diligence_recent_days': 180,
+    'external_due_diligence_max_results': 6, 'external_due_diligence_timeout_seconds': 8,
 }
 
 # Existing local installations may still have these values in .env. They are
@@ -119,6 +125,9 @@ def _normalise_model_runtime(raw: dict[str, Any] | None) -> dict[str, Any]:
     value['embedding_candidate_limit'] = min(100, max(8, value['embedding_candidate_limit']))
     value['embedding_document_token_budget'] = min(3000, max(300, value['embedding_document_token_budget']))
     value['embedding_dimensions'] = min(4096, max(0, value['embedding_dimensions']))
+    value['external_due_diligence_recent_days'] = min(730, max(30, value['external_due_diligence_recent_days']))
+    value['external_due_diligence_max_results'] = min(12, max(2, value['external_due_diligence_max_results']))
+    value['external_due_diligence_timeout_seconds'] = min(60, max(5, value['external_due_diligence_timeout_seconds']))
     for key, default in DEFAULT_MODEL_RUNTIME_CONFIG.items():
         if key not in _BOOL_FIELDS and key not in _INT_FIELDS:
             value[key] = str(value.get(key) or default).strip()

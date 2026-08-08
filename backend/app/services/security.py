@@ -17,29 +17,41 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from ..config import ACCESS_TOKEN_MINUTES, AUTH_SECRET, DATA_ENCRYPTION_KEY
 
-"""The demo follows Dongjiang's documented approval ladder:
+"""The approval ladder and system governance are deliberately separated:
 business applicant -> credit reviewer -> finance approval manager -> group CFO.
 
-`admin` intentionally remains the technical superuser because it also owns
-system configuration, but is presented to users as the Group CFO / final
-approver rather than a generic administrator.
+``admin`` is the technical system administrator.  It cannot approve business
+cases.  ``final_approver`` is the Group CFO / final approver and has no access
+to accounts, model settings, routing configuration, or reset operations.
+Keeping these identities separate prevents a final business decision from
+silently becoming a system-administration action.
 """
-ROLES = ('admin', 'director', 'reviewer', 'business')
+ROLES = ('admin', 'final_approver', 'director', 'reviewer', 'business')
 ROLE_LABELS = {
-    'admin': '集团财务总监 / 最终审批人',
+    'admin': '系统管理员',
+    'final_approver': '集团财务总监 / 最终审批人',
     'director': '财务审批主管',
     'reviewer': '信用审核专员',
     'business': '业务申请人',
 }
 PERMISSIONS = {
-    'admin': {'*'},
+    # System administration is intentionally limited to system governance.
+    # It does not imply a right to create, review or approve business cases.
+    'admin': {'admin:users', 'admin:audit', 'admin:settings', 'admin:routes',
+              'admin:data', 'admin:cases'},
+    # The Group CFO sees the evidence necessary to make a final decision, but
+    # cannot alter the policy catalogue, user accounts or runtime settings.
+    'final_approver': {'credit:read', 'credit:approve', 'review:read',
+                       'review:action', 'export'},
     # The credit reviewer investigates, makes recommendations and performs
     # contract first review.  It may never approve its own credit decision.
     'reviewer': {'credit:create', 'credit:read', 'credit:manage',
-                 'review:create', 'review:read', 'review:action', 'review:manage', 'export'},
+                  'review:create', 'review:read', 'review:action', 'review:manage', 'export',
+                  'rules:read', 'rules:draft'},
     # The finance approval manager performs the second-level credit approval
     # and contract-exception approval; Group CFO handles final exceptions.
-    'director': {'review:read', 'review:action', 'review:manage', 'export', 'credit:read', 'credit:approve'},
+    'director': {'review:read', 'review:action', 'review:manage', 'export', 'credit:read', 'credit:approve',
+                 'rules:read', 'rules:publish'},
     # The applicant can open a credit application, but cannot edit the
     # assessed terms or send it into the finance approval chain.
     'business': {'review:create', 'review:read', 'credit:create', 'credit:read'},

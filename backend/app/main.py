@@ -19,7 +19,7 @@ from .config import (
     EMBEDDING_MODEL, FINANCIAL_LLM_MODEL, LLM_API_BASE, LLM_API_KEY, LLM_MODEL,
     RERANK_ALLOW_REMOTE_FINANCIAL_DATA, RERANK_ENABLED, RERANK_MODEL, UPLOAD_DIR,
     configured_embedding, configured_financial_llm, configured_llm, configured_rerank,
-    ensure_model_runtime_config_file, secure_runtime_ready,
+    ensure_model_runtime_config_file, get_model_runtime_config, secure_runtime_ready,
 )
 from .services.assistant import build_assistant_context, build_messages, chat_llm, mentioned_rule_ids, stream_assistant_answer
 from .services.export_docx import export_revised_docx
@@ -165,24 +165,24 @@ async def rules(user=Depends(current_user)):
     return store.get_rule_version()
 
 @app.get('/api/admin/rule-versions')
-async def rule_versions(user=Depends(require('admin:cases'))):
+async def rule_versions(user=Depends(require('rules:read'))):
     return {'items': store.list_rule_versions()}
 
 @app.post('/api/admin/rule-versions')
-async def rule_draft_create(user=Depends(require('admin:cases'))):
+async def rule_draft_create(user=Depends(require('rules:draft'))):
     result = store.create_rule_draft(user)
     store.audit(user, 'rules.draft_create', 'rule_version', result['version'])
     return result
 
 @app.get('/api/admin/rule-versions/{version}')
-async def rule_version_get(version: str, user=Depends(require('admin:cases'))):
+async def rule_version_get(version: str, user=Depends(require('rules:read'))):
     result = store.get_rule_version(version)
     if not result['rules']:
         raise HTTPException(404, '规则版本不存在')
     return result
 
 @app.patch('/api/admin/rule-versions/{version}/rules/{rule_id}')
-async def rule_definition_update(version: str, rule_id: str, body: dict, user=Depends(require('admin:cases'))):
+async def rule_definition_update(version: str, rule_id: str, body: dict, user=Depends(require('rules:draft'))):
     try:
         result = store.update_rule_definition(version, rule_id, body, user)
     except ValueError as e:
@@ -191,7 +191,7 @@ async def rule_definition_update(version: str, rule_id: str, body: dict, user=De
     return result
 
 @app.post('/api/admin/rule-versions/{version}/publish')
-async def rule_version_publish(version: str, user=Depends(require('admin:cases'))):
+async def rule_version_publish(version: str, user=Depends(require('rules:publish'))):
     try:
         result = store.publish_rule_version(version, user)
     except ValueError as e:
@@ -201,19 +201,19 @@ async def rule_version_publish(version: str, user=Depends(require('admin:cases')
 
 
 @app.get('/api/admin/credit-route-versions')
-async def credit_route_versions(user=Depends(require('admin:cases'))):
+async def credit_route_versions(user=Depends(require('admin:routes'))):
     return {'items': store.list_credit_route_versions()}
 
 
 @app.post('/api/admin/credit-route-versions')
-async def credit_route_draft_create(user=Depends(require('admin:cases'))):
+async def credit_route_draft_create(user=Depends(require('admin:routes'))):
     result = store.create_credit_route_draft(user)
     store.audit(user, 'credit_route.draft_create', 'credit_route_version', result['version'])
     return result
 
 
 @app.get('/api/admin/credit-route-versions/{version}')
-async def credit_route_version_get(version: str, user=Depends(require('admin:cases'))):
+async def credit_route_version_get(version: str, user=Depends(require('admin:routes'))):
     result = store.get_credit_route_version(version)
     if not result.get('version'):
         raise HTTPException(404, '信用审核审批路径版本不存在')
@@ -221,7 +221,7 @@ async def credit_route_version_get(version: str, user=Depends(require('admin:cas
 
 
 @app.patch('/api/admin/credit-route-versions/{version}')
-async def credit_route_version_update(version: str, body: dict, user=Depends(require('admin:cases'))):
+async def credit_route_version_update(version: str, body: dict, user=Depends(require('admin:routes'))):
     try:
         result = store.update_credit_route_version(version, body.get('config') or body, user)
     except ValueError as e:
@@ -231,7 +231,7 @@ async def credit_route_version_update(version: str, body: dict, user=Depends(req
 
 
 @app.post('/api/admin/credit-route-versions/{version}/publish')
-async def credit_route_version_publish(version: str, user=Depends(require('admin:cases'))):
+async def credit_route_version_publish(version: str, user=Depends(require('admin:routes'))):
     try:
         result = store.publish_credit_route_version(version, user)
     except ValueError as e:
@@ -241,7 +241,7 @@ async def credit_route_version_publish(version: str, user=Depends(require('admin
 
 
 @app.post('/api/admin/data/reset')
-async def admin_business_data_reset(user=Depends(require('admin:cases'))):
+async def admin_business_data_reset(user=Depends(require('admin:data'))):
     """Clear operational demo data while preserving identity and configuration."""
     # A background worker that finishes after the reset could recreate a
     # deleted record.  Refuse the operation while any review/translation job
@@ -294,10 +294,12 @@ async def credit_cases(customer: str='', user=Depends(require('credit:read'))):
 @app.post('/api/credit/cases')
 async def credit_case_create(body: dict, user=Depends(require('credit:create'))):
     try:
-        result = store.create_credit_case(body.get('customer_name', ''), body.get('conditions') or {}, body.get('request_note', ''), user, body.get('business_type', '一般'))
+        result = store.create_credit_case(body.get('customer_name', ''), body.get('conditions') or {}, body.get('request_note', ''), user,
+                                          body.get('business_type', '一般'), body.get('enterprise_code', ''), body.get('registered_location', ''))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    store.audit(user, 'credit.create', 'credit_case', result['case_id'], {'customer': result['customer_name'], 'version': result['version']})
+    store.audit(user, 'credit.create', 'credit_case', result['case_id'], {'customer': result['customer_name'], 'version': result['version'],
+                'has_enterprise_code': bool(result.get('enterprise_code')), 'has_registered_location': bool(result.get('registered_location'))})
     return result
 
 @app.patch('/api/credit/cases/{case_id}')
@@ -526,6 +528,8 @@ async def credit_runtime_readiness(user=Depends(require('credit:manage'))):
     financial_ready = configured_financial_llm()
     rerank_ready = configured_rerank()
     embedding_ready = configured_embedding()
+    external_config = get_model_runtime_config()
+    external_enabled = bool(external_config.get('external_due_diligence_enabled', True))
     return {
         'financial_llm': {
             'ready': financial_ready,
@@ -547,6 +551,13 @@ async def credit_runtime_readiness(user=Depends(require('credit:manage'))):
             'model': EMBEDDING_MODEL,
             'message': ('已就绪：与词法召回做 RRF 融合，再交由 qwen3-rerank 精排' if embedding_ready else
                         '未启用或未配置 embedding；当前使用受控词法召回后交由 qwen3-rerank 精排'),
+        },
+        'external_due_diligence': {
+            'ready': external_enabled,
+            'enabled': external_enabled,
+            'provider': 'Exa MCP（无需 API Key）',
+            'message': ('已启用：仅发送企业身份信息，搜索结果须由信用审核专员逐条核验。'
+                        if external_enabled else '系统管理员已关闭 Exa 公开信息尽调'),
         },
         'production_ready': financial_ready and rerank_ready and (not EMBEDDING_ENABLED or embedding_ready),
     }
@@ -600,6 +611,9 @@ async def credit_assessment_apply(case_id: str, assessment_id: str, user=Depends
     if result.get('runtime_mode') != 'production':
         raise HTTPException(409, '该信用审核结果不是可用的正式 Agent 评估记录，不能应用、审批或绑定合同')
     analysis = result.get('assessment') or {}
+    external = result.get('external_due_diligence') or {}
+    if (external.get('findings') or []) or external.get('status') in {'unavailable', 'rate_limited', 'partial'}:
+        raise HTTPException(409, 'Exa 公开尽调存在待核验线索或未完成状态，不能直接采用 Agent 建议；请由信用审核专员逐条处理后再提交')
     if analysis.get('model_status') != 'ready_for_reviewer' or any(item.get('level') == 'high' for item in analysis.get('risk_flags') or []):
         raise HTTPException(409, '评估存在材料缺失或高风险阻断，不能直接应用建议条件')
     try:
@@ -622,12 +636,14 @@ async def credit_reviewer_decision(case_id: str, assessment_id: str, body: dict,
         result = store.record_credit_reviewer_decision(
             case_id, assessment, body.get('conditions') or current['conditions'], body.get('reviewer_note', ''),
             body.get('mode', 'reviewer_adjusted'), user, body.get('business_type') or current.get('business_type', '一般'),
+            body.get('external_decisions') or [],
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     store.audit(user, 'credit.reviewer_decision', 'credit_case', case_id, {
         'assessment_id': assessment_id, 'mode': result.get('review_mode'),
         'has_reviewer_note': bool(result.get('reviewer_note')),
+        'external_reviews': len(result.get('external_reviews') or []),
     })
     return result
 
@@ -755,7 +771,8 @@ def _run(path: str, job_id: str, created_at: float):
                              'customer_name': job['credit_case'].get('customer_name') or '',
                              'version': job['credit_case'].get('version'),
                              'business_type': job['credit_case'].get('business_type', '一般'),
-                             'conditions': job['credit_case'].get('conditions') or {}},
+                             'conditions': job['credit_case'].get('conditions') or {},
+                             'external_reviews': [item for item in (job['credit_case'].get('external_reviews') or []) if item.get('decision') == 'included']},
         )
         credit_case = job['credit_case']
         exposure = store.latest_credit_exposure_snapshot(credit_case['case_id'])
@@ -769,6 +786,14 @@ def _run(path: str, job_id: str, created_at: float):
             'version': credit_case['version'], 'conditions': credit_case['conditions'],
             'business_type': credit_case.get('business_type', '一般'),
             'exposure_snapshot_at_review': (exposure or {}).get('payload'),
+            # Contract approvers receive only the evidence explicitly adopted
+            # by the credit reviewer, with the reviewer rationale and source.
+            # Excluded search leads remain in the credit audit trail but do not
+            # become contract-approval noise.
+            'external_reviews': [item for item in (credit_case.get('external_reviews') or []) if item.get('decision') == 'included'],
+            'review_mode': credit_case.get('review_mode') or '',
+            'reviewer_note': credit_case.get('reviewer_note') or '',
+            'reviewed_at': credit_case.get('reviewed_at'),
         }
         if credit_risks:
             report['risks'] = [*report.get('risks', []), *credit_risks]
@@ -1006,6 +1031,17 @@ async def approvals(job_id: str, user=Depends(require('review:read'))):
     _assert_case_access(job_id, user)
     return {'items': store.list_approvals(job_id, user)}
 
+@app.post('/api/reviews/{job_id}/approvals/batch')
+async def approval_batch_decision(job_id: str, body: dict, user=Depends(require('review:action'))):
+    _assert_case_access(job_id, user)
+    try:
+        result = store.decide_approvals_batch(job_id, body.get('decision', ''), body.get('note', ''), user)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit(user, 'review.approval_batch_decision', 'approval_package', job_id,
+                {'decision': body.get('decision'), 'count': result['count'], 'role': result['required_role']})
+    return result
+
 @app.post('/api/reviews/{job_id}/approvals/{approval_id}')
 async def approval_decision(job_id: str, approval_id: str, body: dict, user=Depends(require('review:action'))):
     _assert_case_access(job_id, user)
@@ -1056,18 +1092,6 @@ async def material_download(job_id: str, request_id: str, file_id: str, user=Dep
     if not item or not os.path.isfile(item['stored_path']):
         raise HTTPException(404, '附件不存在')
     return FileResponse(item['stored_path'], filename=item['original_name'])
-
-@app.get('/api/contracts/knowledge')
-async def clause_knowledge(rule_id: str='', limit: int=3, user=Depends(require('review:read'))):
-    return {'items': store.list_knowledge(rule_id, min(max(limit, 1), 10))}
-
-@app.get('/api/reviews/{job_id}/findings/{finding_id}/knowledge')
-async def finding_knowledge(job_id: str, finding_id: str, user=Depends(require('review:read'))):
-    _assert_case_access(job_id, user)
-    try:
-        return {'items': store.similar_knowledge(job_id, finding_id, 3)}
-    except ValueError as e:
-        raise HTTPException(404, str(e))
 
 @app.get('/api/reviews/{job_id}/compare/{baseline_job_id}')
 async def compare_contract_versions(job_id: str, baseline_job_id: str, user=Depends(require('review:read'))):

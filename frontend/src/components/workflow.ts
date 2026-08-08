@@ -13,7 +13,8 @@ export const roleDisplayName: Record<string, string> = {
   business: '业务申请人',
   reviewer: '信用审核专员',
   director: '财务审批主管',
-  admin: '集团财务总监 / 最终审批人',
+  admin: '系统管理员',
+  final_approver: '集团财务总监 / 最终审批人',
   system: '系统',
 }
 

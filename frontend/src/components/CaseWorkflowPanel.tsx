@@ -13,6 +13,7 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
   const [approvals, setApprovals] = useState<ApprovalItem[]>([])
   const [materials, setMaterials] = useState<MaterialRequest[]>([])
   const [selectedApproval, setSelectedApproval] = useState<ApprovalItem | null>(null)
+  const [batchMode, setBatchMode] = useState(false)
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialRequest | null>(null)
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
@@ -41,14 +42,19 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
 
   useEffect(() => { load() }, [jobId])
 
-  const canDecide = (item: ApprovalItem) => user?.role === 'admin' || user?.role === item.required_role
+  const canDecide = (item: ApprovalItem) => user?.role === item.required_role
   const decide = async (decision: string) => {
     if (!jobId || !selectedApproval || !note.trim()) return message.warning('请填写审批意见')
     setBusy(true)
     try {
-      await api.decideApproval(jobId, selectedApproval.approval_id, { decision, note })
-      message.success('审批决定已记录')
-      setSelectedApproval(null); setNote(''); load()
+      if (batchMode) {
+        const result = await api.decideApprovalBatch(jobId, { decision, note })
+        message.success(`已对 ${result.count} 项同级例外记录审批决定`)
+      } else {
+        await api.decideApproval(jobId, selectedApproval.approval_id, { decision, note })
+        message.success('审批决定已记录')
+      }
+      setSelectedApproval(null); setBatchMode(false); setNote(''); load()
     } catch (error: any) { message.error(error?.message || '审批提交失败') } finally { setBusy(false) }
   }
   const resolve = async () => {
@@ -118,13 +124,15 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
 
   if (!jobId) return null
   const showWorkflow = approvals.length > 0 || materials.length > 0
+  const myPendingApprovals = approvals.filter(item => item.status === 'pending' && canDecide(item))
 
   return <>
     {showWorkflow && <Card title="审批与补充材料" style={{ marginTop: 16 }}>
       {approvals.length > 0 && <>
         <Alert type={approvals.some(x => x.status === 'pending') ? 'warning' : 'success'} showIcon
           message={approvals.some(x => x.status === 'pending') ? '存在待审批的合同例外，完成前不能导出可签约修订稿。' : '所有必需的合同例外审批均已有决定。'} />
-          <List size="small" style={{ marginTop: 12 }} dataSource={approvals} renderItem={item => <List.Item actions={canDecide(item) && item.status === 'pending' ? [<Button size="small" icon={<SendOutlined />} onClick={() => { setSelectedApproval(item); setNote('') }}>处理审批</Button>] : []}>
+        {myPendingApprovals.length > 1 && <Button style={{ marginTop: 12 }} icon={<SendOutlined />} onClick={() => { setSelectedApproval(myPendingApprovals[0]); setBatchMode(true); setNote('') }}>作为例外审批包处理全部 {myPendingApprovals.length} 项</Button>}
+          <List size="small" style={{ marginTop: 12 }} dataSource={approvals} renderItem={item => <List.Item actions={canDecide(item) && item.status === 'pending' ? [<Button size="small" icon={<SendOutlined />} onClick={() => { setSelectedApproval(item); setBatchMode(false); setNote('') }}>单项处理</Button>] : []}>
           <List.Item.Meta title={<Space><Tag color={item.status === 'approved' ? 'green' : item.status === 'pending' ? 'orange' : 'red'}>{item.status === 'approved' ? '已批准' : item.status === 'pending' ? '待审批' : item.status === 'changes_requested' ? '需修改' : '已驳回'}</Tag><Text strong>需{approvalRoleLabel(item.required_role)}审批</Text></Space>}
             description={item.decision_note || `创建于 ${fmtTime(item.created_at)}`} />
         </List.Item>} />
@@ -178,7 +186,8 @@ export default function CaseWorkflowPanel({ jobId }: { jobId?: string }) {
       </Space>}
     </Card></>}</Card>
 
-    <Modal title={`处理${approvalRoleLabel(selectedApproval?.required_role)}审批`} open={!!selectedApproval} onCancel={() => setSelectedApproval(null)} footer={<Space><Button onClick={() => setSelectedApproval(null)}>取消</Button><Button danger loading={busy} onClick={() => decide('rejected')}>驳回</Button><Button loading={busy} onClick={() => decide('changes_requested')}>要求改稿</Button><Button type="primary" loading={busy} onClick={() => decide('approved')}>批准例外</Button></Space>}>
+    <Modal title={batchMode ? `处理${approvalRoleLabel(selectedApproval?.required_role)}例外审批包` : `处理${approvalRoleLabel(selectedApproval?.required_role)}审批`} open={!!selectedApproval} onCancel={() => { setSelectedApproval(null); setBatchMode(false) }} footer={<Space><Button onClick={() => { setSelectedApproval(null); setBatchMode(false) }}>取消</Button><Button danger loading={busy} onClick={() => decide('rejected')}>驳回</Button><Button loading={busy} onClick={() => decide('changes_requested')}>要求改稿</Button><Button type="primary" loading={busy} onClick={() => decide('approved')}>{batchMode ? '批准全部例外' : '批准例外'}</Button></Space>}>
+      {batchMode && <Alert type="info" showIcon style={{ marginBottom: 12 }} message={`本次意见将写入当前案件下全部 ${approvalRoleLabel(selectedApproval?.required_role)}级待审批条款，并分别保留审计记录。`} />}
       <Input.TextArea rows={4} value={note} onChange={event => setNote(event.target.value)} placeholder="必填：审批依据、边界或改稿要求" />
     </Modal>
     <Modal title="确认待补材料" open={!!selectedMaterial} onCancel={() => setSelectedMaterial(null)} onOk={resolve} confirmLoading={busy} okText="确认完成"><Input.TextArea rows={4} value={note} onChange={event => setNote(event.target.value)} placeholder="必填：已补充的材料、附件或核验结论" /></Modal>

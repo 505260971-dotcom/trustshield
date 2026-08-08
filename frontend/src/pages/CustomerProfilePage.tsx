@@ -7,7 +7,7 @@ import { fmtTime } from '../components/common'
 import CustomerExposureGuard from '../components/CustomerExposureGuard'
 
 const { Title, Text } = Typography
-const roleText:Record<string,string>={business:'业务申请人',reviewer:'信用审核专员',director:'财务审批主管',admin:'集团财务总监',system:'系统'}
+const roleText:Record<string,string>={business:'业务申请人',reviewer:'信用审核专员',director:'财务审批主管',final_approver:'集团财务总监',admin:'系统管理员',system:'系统'}
 const creditText:Record<string,string>={draft:'待信用审核',returned_to_reviewer:'退回审核专员',returned_to_business:'待业务补充材料',pending_director:'待主管复核',pending_final:'待最终审批',approved:'已生效',rejected:'已拒绝',superseded:'历史版本'}
 const stageText:Record<string,string>={draft:'待上传合同',awaiting_credit:'等待有效信用审核',ai_review:'系统审查中',legal_review:'信用审核专员复核',awaiting_business:'待业务补充材料',approval:'待主管审批',final_approval:'待最终审批',ready_to_sign:'可签约',archived:'已归档',cancelled:'已取消'}
 const tone=(stage:string)=>stage==='approved'||stage==='ready_to_sign'?'green':stage.includes('return')||stage==='awaiting_business'||stage==='awaiting_credit'?'orange':stage==='rejected'||stage==='cancelled'?'red':'blue'

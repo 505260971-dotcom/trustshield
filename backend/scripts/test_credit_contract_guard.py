@@ -28,25 +28,26 @@ def approved_credit(reviewer, director, cfo, days=45):
         'allowed_payment_methods': ['bank_transfer'],
         'allow_vmi_jit': False,
     }, '回归测试信审', reviewer)
-    # A credit version now needs an attributable production assessment basis
-    # before it can enter the human approval ladder.
+    # A credit version needs an attributable production assessment basis before
+    # the credit reviewer can make it effective.
     task = store.start_credit_assessment(item['case_id'], reviewer)
     report = {
         'runtime_mode': 'production', 'audit_runtime': {'status': 'ready_for_policy'},
         'assessment': {'model_status': 'ready_for_reviewer', 'risk_flags': [],
                        'business_type': '一般', 'recommendation': item['conditions']},
+        'external_due_diligence': {'status': 'review_required', 'findings': [{
+            'finding_id': 'EXA-CONTRACT-GUARD', 'code': 'EXTERNAL_ADVERSE_LEAD', 'severity': 'mid',
+            'title': '公开合同纠纷线索', 'summary': '用于验证合同审批可见性。',
+            'source': {'url': 'https://example.test/external-risk'},
+        }]},
     }
     assessment = store.finish_credit_assessment(task['assessment_id'], report, [])
-    item = store.record_credit_reviewer_decision(item['case_id'], assessment, item['conditions'], '', 'agent_recommended', reviewer)
-    store.submit_credit_case(item['case_id'], reviewer)
-    try:
-        store.decide_credit_case(item['case_id'], 'approved', '试图跳过主管复核', cfo)
-        raise AssertionError('集团财务总监不得跳过财务审批主管直接生效信审')
-    except ValueError as exc:
-        assert '财务审批主管' in str(exc)
-    item = store.decide_credit_case(item['case_id'], 'approved', '主管复核通过', director)
-    assert item['status'] == 'pending_final'
-    return store.decide_credit_case(item['case_id'], 'approved', '集团财务总监最终批核', cfo)
+    item = store.record_credit_reviewer_decision(item['case_id'], assessment, item['conditions'], '', 'agent_recommended', reviewer,
+                                                 external_decisions=[{'finding_id': 'EXA-CONTRACT-GUARD', 'decision': 'included',
+                                                                      'note': '主体和案件事实已核验，纳入本次信用判断。'}])
+    approved = store.submit_credit_case(item['case_id'], reviewer)
+    assert approved['status'] == 'approved'
+    return approved
 
 
 def main():
@@ -54,7 +55,9 @@ def main():
     admin = store.authenticate('admin', 'AdminPassword2026!')
     reviewer = store.create_user('reviewer', '信用审核专员', 'reviewer', 'ReviewerPassword2026!')
     director = store.create_user('director', '财务审批主管', 'director', 'DirectorPassword2026!')
-    credit_v1 = approved_credit(reviewer, director, admin)
+    final = store.create_user('final', '集团财务总监', 'final_approver', 'FinalPassword2026!')
+    business = store.create_user('business', '业务申请人', 'business', 'BusinessPassword2026!')
+    credit_v1 = approved_credit(reviewer, director, final)
     assert store.require_active_credit_case(credit_v1['case_id'])['version'] == 1
 
     clauses = [{'id': 'C1', 'text': '货物交付后60天付款，交付前支付20%预付款，付款方式为银行承兑汇票，并采用VMI模式。'}]
@@ -65,28 +68,38 @@ def main():
     negated = assess_credit_compliance([{'id': 'C2', 'text': '双方采用普通送货方式，不采用 VMI、JIT、供应商管理库存或准时制交付模式。'}], credit_v1['conditions'])
     assert 'CREDIT_DELIVERY_MODE' not in {item['rule_id'] for item in negated}, '明确禁止 VMI/JIT 不应触发信审阻断'
 
-    contract = store.create_case_center('测试客户甲', '一般', '合同回归测试', admin, credit_v1['case_id'])
-    store.create_pending('credit-review-1', 'sample.docx', '', admin, credit_case=credit_v1, case_id=contract['case_id'])
+    contract = store.create_case_center('测试客户甲', '一般', '合同回归测试', business, credit_v1['case_id'])
+    store.create_pending('credit-review-1', 'sample.docx', '', business, credit_case=credit_v1, case_id=contract['case_id'])
+    bound_snapshot = store.contract_credit_binding('credit-review-1')
+    assert bound_snapshot['external_reviews'][0]['title'] == '公开合同纠纷线索'
+    assert bound_snapshot['external_reviews'][0]['decision'] == 'included'
     # A durable but unbound draft can be safely recovered at upload time only
     # with an approved credit case for the very same customer.
-    recovered = store.create_case_center('测试客户甲', '一般', '上传重试回归测试', admin)
-    rebound = store.bind_case_center_credit(recovered['case_id'], credit_v1['case_id'], admin)
+    recovered = store.create_case_center('测试客户甲', '一般', '上传重试回归测试', business)
+    rebound = store.bind_case_center_credit(recovered['case_id'], credit_v1['case_id'], business)
     assert rebound['case_id'] == credit_v1['case_id']
-    assert store.get_case_center(recovered['case_id'], admin)['credit_case_id'] == credit_v1['case_id']
+    assert store.get_case_center(recovered['case_id'], business)['credit_case_id'] == credit_v1['case_id']
     report = {'filename': 'sample.docx', 'summary': {'n_clauses': 1, 'n_risks': len(findings), 'high': len(findings), 'mid': 0, 'low': 0, 'overall_level': '信审阻断'},
               'contract_fields': {}, 'masked_entities': 0, 'clauses': clauses, 'steps': [], 'risks': findings}
-    store.save_review('credit-review-1', report, actor=admin)
+    store.save_review('credit-review-1', report, actor=reviewer)
     finding = store.list_findings('credit-review-1')[0]
     try:
-        store.record_finding_action('credit-review-1', finding['finding_id'], 'ignore', '想在合同端放行', admin)
+        store.record_finding_action('credit-review-1', finding['finding_id'], 'ignore', '想在合同端放行', reviewer)
         raise AssertionError('不符合信用审核条件的问题不应允许在合同端忽略')
     except ValueError as exc:
         assert '不符合信用审核条件' in str(exc)
     assert store.contract_credit_binding('credit-review-1')['version'] == 1
+    # The same credit package is not approved a second time.  It is visible in
+    # contract review; the later contract approver can reject the contract
+    # itself with a reason if the package is not acceptable.
+    submitted_contract = store.transition_case(contract['case_id'], 'submit_approval', reviewer, '已核对合同与已纳入外部公开信息。')
+    assert submitted_contract['current_stage'] == 'approval'
+    rejected_contract = store.transition_case(contract['case_id'], 'reject', director, '合同风险与本次商业安排不匹配，驳回。')
+    assert rejected_contract['current_stage'] == 'cancelled'
 
     # A commercial relaxation must produce a new credit version.  The old
     # contract binding becomes invalid and must be re-reviewed.
-    credit_v2 = approved_credit(reviewer, director, admin, days=60)
+    credit_v2 = approved_credit(reviewer, director, final, days=60)
     assert credit_v2['version'] == 2
     try:
         store.contract_credit_binding('credit-review-1', require_current=True)
@@ -95,7 +108,7 @@ def main():
         assert '尚未生效' in str(exc)
     # 页面预检：案件详情应能提前看到“绑定版本已不是当前生效版本”，
     # 而不是等到导出时才由后端报错。
-    case_center = store.get_case_center(contract['case_id'], admin)
+    case_center = store.get_case_center(contract['case_id'], business)
     binding = case_center['credit_binding']
     assert binding is not None and binding['version'] == 1 and binding['stale'] is True
     assert any('不再生效' in reason or 'V2' in reason for reason in binding['reasons'])

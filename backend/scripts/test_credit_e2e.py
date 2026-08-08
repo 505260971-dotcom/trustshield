@@ -62,13 +62,16 @@ def _wait_review(client: TestClient, headers: dict[str, str], job_id: str) -> di
 def main():
     assert FIXTURE.is_file(), f'缺少测试样本: {FIXTURE}'
     with TestClient(app) as client:
-        # The application seeds admin at startup; create the required second
-        # approval role directly in this isolated test database.
+        # The application seeds a system administrator at startup.  Business
+        # credit operations are executed by the dedicated reviewer role.
+        store.create_user('reviewer', '信用审核专员', 'reviewer', 'ReviewerPassword2026!')
         store.create_user('director', '财务审批主管', 'director', 'DirectorPassword2026!')
+        store.create_user('final', '集团财务总监', 'final_approver', 'FinalPassword2026!')
         admin = _login(client, 'admin', 'AdminPassword2026!')
+        reviewer = _login(client, 'reviewer', 'ReviewerPassword2026!')
         director = _login(client, 'director', 'DirectorPassword2026!')
 
-        created = client.post('/api/credit/cases', headers=admin, json={
+        created = client.post('/api/credit/cases', headers=reviewer, json={
             'customer_name': '测试制造客户（脱敏）', 'business_type': 'TKP', 'request_note': '端到端验收',
             'conditions': {
                 'max_credit_amount': 1_000_000, 'currency': 'CNY', 'max_payment_days': 120,
@@ -78,33 +81,34 @@ def main():
         assert created.status_code == 200, created.text
         case_id = created.json()['case_id']
 
-        uploaded = client.post(f'/api/credit/cases/{case_id}/documents', headers=admin,
+        uploaded = client.post(f'/api/credit/cases/{case_id}/documents', headers=reviewer,
                                data={'document_type': 'financial_report'},
                                files={'file': (FIXTURE.name, FIXTURE.read_bytes(), 'text/plain')})
         assert uploaded.status_code == 200, uploaded.text
-        exposure = client.post(f'/api/credit/cases/{case_id}/exposure', headers=admin, json={
+        exposure = client.post(f'/api/credit/cases/{case_id}/exposure', headers=reviewer, json={
             'source': 'crm_mock', 'current_receivables': 100_000, 'booked_order_amount': 200_000,
             'overdue_amount': 0, 'overdue_days': 0, 'currency': 'CNY',
         })
         assert exposure.status_code == 200, exposure.text
 
-        started = client.post(f'/api/credit/cases/{case_id}/assessments', headers=admin, json={})
+        started = client.post(f'/api/credit/cases/{case_id}/assessments', headers=reviewer, json={})
         assert started.status_code == 200, started.text
         assessment_id = started.json()['assessment_id']
-        assessment_status = _wait_credit(client, admin, case_id, assessment_id)
+        assessment_status = _wait_credit(client, reviewer, case_id, assessment_id)
         assert assessment_status['status'] == 'done', assessment_status
-        assessment = client.get(f'/api/credit/cases/{case_id}/assessments/latest', headers=admin)
+        assessment = client.get(f'/api/credit/cases/{case_id}/assessments/latest', headers=reviewer)
         assert assessment.status_code == 200, assessment.text
         report = assessment.json()['report']
         assert report['runtime_mode'] == 'production', report
         assert report['assessment']['credit_grade'] == 'UNASSESSABLE', report
         assert report['assessment']['recommendation']['max_credit_amount'] == 0, report
 
-        applied = client.post(f'/api/credit/cases/{case_id}/assessments/{assessment_id}/apply', headers=admin)
+        applied = client.post(f'/api/credit/cases/{case_id}/assessments/{assessment_id}/apply', headers=reviewer)
         # Without a real Agent/reranker, production must fail closed and must
         # never create a credit version or enter the contract workflow.
         assert applied.status_code == 409, applied.text
-        assert '材料缺失或高风险阻断' in applied.json()['detail']
+        assert ('材料缺失或高风险阻断' in applied.json()['detail']
+                or 'Exa 公开尽调' in applied.json()['detail'])
         print('OK: production credit assessment fails closed without Agent/reranker')
 
 

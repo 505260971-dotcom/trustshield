@@ -14,6 +14,7 @@ from typing import Any
 from .config import (DATA_DIR, DATA_ENCRYPTION_KEY, INITIAL_ADMIN_NAME, INITIAL_ADMIN_PASSWORD,
                      INITIAL_ADMIN_USERNAME, UPLOAD_DIR)
 from .services.security import ROLES, decrypt_json, encrypt_json, password_hash, verify_password
+from .services.case_route import evaluate_case_route
 
 DB_PATH = os.path.join(DATA_DIR, 'contractguard.db')
 _lock = threading.Lock()
@@ -27,7 +28,7 @@ BUSINESS_RESET_TABLES = (
     'review_actions', 'finding_approvals', 'material_files', 'material_requests',
     'export_snapshots', 'contract_versions', 'translations', 'case_attachments',
     'review_findings', 'mask_mappings', 'case_documents', 'case_events',
-    'reviews', 'workflow_tasks', 'contract_cases', 'clause_knowledge',
+    'reviews', 'workflow_tasks', 'contract_cases',
     # Credit review children and the credit case itself.
     'credit_evidence', 'credit_document_text_assets', 'credit_documents',
     'credit_exposure_snapshots', 'credit_assessments', 'credit_cases',
@@ -105,10 +106,6 @@ def init_db():
           job_id TEXT PRIMARY KEY, parent_job_id TEXT, version_label TEXT NOT NULL DEFAULT 'V1',
           compare_json TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS clause_knowledge (
-          case_id TEXT PRIMARY KEY, rule_id TEXT NOT NULL, business_type TEXT, source_clause TEXT NOT NULL,
-          source_ref TEXT, evidence TEXT, suggested_text TEXT, outcome TEXT NOT NULL, created_by TEXT, created_at REAL NOT NULL
-        );
         CREATE TABLE IF NOT EXISTS export_snapshots (
           export_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, mode TEXT NOT NULL, output_path TEXT NOT NULL,
           approvals_json TEXT NOT NULL, findings_json TEXT NOT NULL, exported_by TEXT, created_at REAL NOT NULL
@@ -127,6 +124,8 @@ def init_db():
           request_note TEXT NOT NULL DEFAULT '', decision_note TEXT NOT NULL DEFAULT '',
           created_by TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL,
           submitted_at REAL, decided_by TEXT, decided_at REAL,
+          enterprise_code TEXT NOT NULL DEFAULT '', registered_location TEXT NOT NULL DEFAULT '',
+          external_review_json TEXT NOT NULL DEFAULT '[]', external_reviewed_by TEXT, external_reviewed_at REAL,
           UNIQUE(customer_key, version)
         );
         /* Credit-assessment artifacts are deliberately separate from the
@@ -206,7 +205,6 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_approvals_job ON finding_approvals(job_id);
         CREATE INDEX IF NOT EXISTS idx_materials_job ON material_requests(job_id);
         CREATE INDEX IF NOT EXISTS idx_material_files_request ON material_files(request_id);
-        CREATE INDEX IF NOT EXISTS idx_knowledge_rule ON clause_knowledge(rule_id);
         CREATE INDEX IF NOT EXISTS idx_export_snapshots_job ON export_snapshots(job_id);
         CREATE INDEX IF NOT EXISTS idx_rule_definitions_version ON rule_definitions(version);
         CREATE INDEX IF NOT EXISTS idx_credit_customer ON credit_cases(customer_key, status, version DESC);
@@ -234,6 +232,11 @@ def init_db():
         _add_column(c, 'credit_cases', 'director_by TEXT')
         _add_column(c, 'credit_cases', 'director_at REAL')
         _add_column(c, 'credit_cases', "business_type TEXT NOT NULL DEFAULT '一般'")
+        _add_column(c, 'credit_cases', "enterprise_code TEXT NOT NULL DEFAULT ''")
+        _add_column(c, 'credit_cases', "registered_location TEXT NOT NULL DEFAULT ''")
+        _add_column(c, 'credit_cases', "external_review_json TEXT NOT NULL DEFAULT '[]'")
+        _add_column(c, 'credit_cases', 'external_reviewed_by TEXT')
+        _add_column(c, 'credit_cases', 'external_reviewed_at REAL')
         # A published credit decision must retain both the Agent/model basis
         # and the reviewer's final commercial terms.  This prevents a manual
         # edit from silently disconnecting an approval from its evidence.
@@ -262,30 +265,45 @@ def init_db():
         # Runtime model configuration now has one home: backend/data/config.json.
         # This old table contained only provider settings and no business data.
         c.execute('DROP TABLE IF EXISTS runtime_settings')
-        # Role-model migration (v4): the original credit/legal/CEO demo
-        # roles are consolidated into the Dongjiang approval hierarchy.  This
-        # runs idempotently on startup so existing local accounts, pending
-        # approvals and historic audit rows remain usable.
-        for old_role, new_role in {'credit': 'reviewer', 'legal': 'reviewer', 'ceo': 'admin'}.items():
+        # The clause-knowledge feature was removed entirely (demo scope);
+        # drop the table from existing databases instead of keeping a dead schema.
+        c.execute('DROP TABLE IF EXISTS clause_knowledge')
+        # Role-model migration: the original credit/legal/CEO demo roles are
+        # consolidated into the current approval hierarchy.  ``admin`` is now
+        # a system administrator, so historic CEO/final-approval assignments
+        # move to the explicitly separated final_approver role.
+        for old_role, new_role in {'credit': 'reviewer', 'legal': 'reviewer', 'ceo': 'final_approver'}.items():
             c.execute('UPDATE users SET role=?,updated_at=? WHERE role=?', (new_role, time.time(), old_role))
             c.execute('UPDATE review_actions SET actor_role=? WHERE actor_role=?', (new_role, old_role))
             c.execute('UPDATE audit_events SET actor_role=? WHERE actor_role=?', (new_role, old_role))
             c.execute('UPDATE finding_approvals SET required_role=? WHERE required_role=?', (new_role, old_role))
             c.execute('UPDATE rule_definitions SET approval_role=? WHERE approval_role=?', (new_role, old_role))
+        c.execute("UPDATE finding_approvals SET required_role='final_approver' WHERE required_role='admin'")
+        c.execute("UPDATE rule_definitions SET approval_role='final_approver' WHERE approval_role='admin'")
         # Give historic in-flight work the same explicit ownership as newly
         # created work.  This is deliberately idempotent and only fills blank
         # assignments, never overwriting a person chosen before the upgrade.
         for status, role in {'draft': 'reviewer', 'returned_to_reviewer': 'reviewer',
-                             'pending_director': 'director', 'pending_final': 'admin'}.items():
+                             'pending_director': 'director', 'pending_final': 'final_approver'}.items():
             c.execute('''UPDATE credit_cases SET assigned_to=(SELECT id FROM users
                        WHERE active=1 AND role=? ORDER BY created_at,id LIMIT 1)
                        WHERE status=? AND (assigned_to IS NULL OR assigned_to='')''', (role, status))
+        # Existing databases used the system-admin account for final approval.
+        # Re-route only in-flight final decisions to a real final approver;
+        # historic audit rows intentionally retain their original actor.
+        c.execute('''UPDATE credit_cases SET assigned_to=(SELECT id FROM users
+                   WHERE active=1 AND role='final_approver' ORDER BY created_at,id LIMIT 1)
+                   WHERE status='pending_final' AND COALESCE((SELECT role FROM users WHERE id=credit_cases.assigned_to),'')<>'final_approver' ''')
         c.execute('''UPDATE credit_cases SET assigned_to=created_by
                      WHERE status='returned_to_business' AND (assigned_to IS NULL OR assigned_to='')''')
-        for task_type, role in {'legal_review': 'reviewer', 'approval': 'director', 'final_approval': 'admin'}.items():
+        for task_type, role in {'legal_review': 'reviewer', 'approval': 'director', 'final_approval': 'final_approver'}.items():
             c.execute('''UPDATE workflow_tasks SET assignee_id=(SELECT id FROM users
                        WHERE active=1 AND role=? ORDER BY created_at,id LIMIT 1)
                        WHERE status='open' AND task_type=? AND (assignee_id IS NULL OR assignee_id='')''', (role, task_type))
+        c.execute('''UPDATE workflow_tasks SET assignee_id=(SELECT id FROM users
+                   WHERE active=1 AND role='final_approver' ORDER BY created_at,id LIMIT 1)
+                   WHERE status='open' AND task_type='final_approval'
+                   AND COALESCE((SELECT role FROM users WHERE id=workflow_tasks.assignee_id),'')<>'final_approver' ''')
         c.execute('''UPDATE workflow_tasks SET assignee_id=(SELECT created_by FROM contract_cases c
                    WHERE c.case_id=workflow_tasks.case_id)
                    WHERE status='open' AND task_type IN ('credit_required','document_required','revision_required','material')
@@ -297,7 +315,7 @@ def init_db():
         c.execute("UPDATE credit_cases SET status='pending_director',updated_at=? WHERE status='pending_approval'", (time.time(),))
         # Refresh only the legacy demo wording while preserving any unrelated
         # administrator edits to the rule catalogue.
-        c.execute("UPDATE rule_definitions SET baseline=REPLACE(baseline,'CEO','集团财务总监'), rule_check=REPLACE(rule_check,'CEO','最终审批人'), template=REPLACE(template,'CEO','集团财务总监') WHERE approval_role='admin' AND (baseline LIKE '%CEO%' OR rule_check LIKE '%CEO%' OR template LIKE '%CEO%')")
+        c.execute("UPDATE rule_definitions SET baseline=REPLACE(baseline,'CEO','集团财务总监'), rule_check=REPLACE(rule_check,'CEO','最终审批人'), template=REPLACE(template,'CEO','集团财务总监') WHERE approval_role='final_approver' AND (baseline LIKE '%CEO%' OR rule_check LIKE '%CEO%' OR template LIKE '%CEO%')")
         c.execute("UPDATE rule_definitions SET baseline=REPLACE(baseline,'总监','财务审批主管'), rule_check=REPLACE(rule_check,'总监','主管'), template=REPLACE(template,'总监','财务审批主管') WHERE approval_role='director' AND (baseline LIKE '%总监%' OR rule_check LIKE '%总监%' OR template LIKE '%总监%')")
         # One-time data normalisation: every historical review becomes a
         # document version under its owning case.  Runtime code below only
@@ -512,7 +530,7 @@ def publish_credit_route_version(version: str, actor: dict) -> dict:
     return get_credit_route_version(version)
 
 
-def _evaluate_credit_route(route: dict, conditions: dict, review_mode: str='') -> dict:
+def _evaluate_credit_route(route: dict, conditions: dict, review_mode: str='', external_reviews: list[dict] | None=None) -> dict:
     config = route['config']; reasons: list[str] = []
     if not config['director_required']:
         raise ValueError('当前信用审核审批路径未要求主管复核，配置无效')
@@ -529,11 +547,14 @@ def _evaluate_credit_route(route: dict, conditions: dict, review_mode: str='') -
         reasons.append('允许 VMI/JIT')
     if config['final_on_manual_override'] and review_mode in {'reviewer_adjusted', 'manual_override'}:
         reasons.append('人工修订或备用条件提交审批')
+    if any(item.get('decision') == 'included' and item.get('severity') == 'high' for item in (external_reviews or [])):
+        reasons.append('已纳入重大外部公开风险')
     return {'version': route['version'], 'config': config, 'requires_final': bool(reasons), 'reasons': reasons}
 
 
 def credit_route_for_case(conditions: dict, review_mode: str='', assessment_snapshot: dict | None=None) -> dict:
-    return _evaluate_credit_route(get_credit_route_version(), conditions, review_mode)
+    return _evaluate_credit_route(get_credit_route_version(), conditions, review_mode,
+                                  (assessment_snapshot or {}).get('external_reviews') or [])
 
 def _rule_rows(version: str):
     with _lock, _conn() as c:
@@ -613,6 +634,7 @@ def _credit_case(row) -> dict | None:
     item['conditions'] = json.loads(item.pop('conditions_json') or '{}')
     item['assessment_snapshot'] = json.loads(item.pop('assessment_snapshot_json', '') or '{}')
     item['route_snapshot'] = json.loads(item.pop('route_snapshot_json', '') or '{}')
+    item['external_reviews'] = json.loads(item.pop('external_review_json', '') or '[]')
     return item
 
 def _customer_key(customer_name: str) -> str:
@@ -652,10 +674,11 @@ def get_credit_case(case_id: str) -> dict | None:
     with _lock, _conn() as c:
         return _credit_case(c.execute('SELECT * FROM credit_cases WHERE case_id=?', (case_id,)).fetchone())
 
-def create_credit_case(customer_name: str, conditions: dict, request_note: str, actor: dict, business_type: str='一般') -> dict:
+def create_credit_case(customer_name: str, conditions: dict, request_note: str, actor: dict, business_type: str='一般',
+                       enterprise_code: str='', registered_location: str='') -> dict:
     from .services.credit import normalize_conditions
     customer_name = (customer_name or '').strip()
-    if actor.get('role') not in {'business', 'reviewer', 'admin'}:
+    if actor.get('role') not in {'business', 'reviewer'}:
         raise ValueError('当前角色不能发起信用审核申请')
     key = _customer_key(customer_name)
     normal = normalize_conditions(conditions)
@@ -667,15 +690,16 @@ def create_credit_case(customer_name: str, conditions: dict, request_note: str, 
         # A credit reviewer who creates a version is the natural first owner.
         # Business/CRM requests still use the normal reviewer routing rule.
         reviewer_id = actor.get('id') if actor.get('role') == 'reviewer' else _role_assignee(c, 'reviewer')
-        c.execute('''INSERT INTO credit_cases(case_id,customer_key,customer_name,version,status,conditions_json,request_note,decision_note,created_by,created_at,updated_at,business_type,assigned_to)
-                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        c.execute('''INSERT INTO credit_cases(case_id,customer_key,customer_name,version,status,conditions_json,request_note,decision_note,created_by,created_at,updated_at,business_type,assigned_to,enterprise_code,registered_location)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                    (case_id, key, customer_name, version, 'draft', json.dumps(normal, ensure_ascii=False),
-                    (request_note or '').strip()[:2000], '', actor.get('id'), now, now, business_type, reviewer_id))
+                    (request_note or '').strip()[:2000], '', actor.get('id'), now, now, business_type, reviewer_id,
+                    str(enterprise_code or '').strip()[:80], str(registered_location or '').strip()[:120]))
     return get_credit_case(case_id)
 
 def update_credit_case(case_id: str, conditions: dict, request_note: str, actor: dict, reviewer_note: str='') -> dict:
     from .services.credit import normalize_conditions
-    if actor.get('role') not in {'reviewer', 'admin'}:
+    if actor.get('role') != 'reviewer':
         raise ValueError('仅信用审核专员可评估并修改信用审核条件')
     normal = normalize_conditions(conditions)
     with _lock, _conn() as c:
@@ -698,7 +722,7 @@ def update_credit_case(case_id: str, conditions: dict, request_note: str, actor:
 
 
 def set_credit_business_type(case_id: str, business_type: str, actor: dict) -> dict:
-    if actor.get('role') not in {'reviewer', 'admin'}:
+    if actor.get('role') != 'reviewer':
         raise ValueError('仅信用审核专员可调整信用审核业务类型')
     value = str(business_type or '一般').strip()[:40]
     if value not in {'TKM', 'TKP', '模具制作', '注塑组件制造', '一般'}:
@@ -717,17 +741,51 @@ def _assessment_snapshot(assessment: dict) -> dict:
     report = assessment.get('report') or {}
     analysis = report.get('assessment') or {}
     audit = report.get('audit_runtime') or {}
+    external = report.get('external_due_diligence') or {}
     return {
         'assessment_id': assessment.get('assessment_id'), 'assessment_status': assessment.get('status'),
         'model_version': assessment.get('model_version'), 'policy_version': assessment.get('policy_version'),
         'runtime_mode': report.get('runtime_mode'), 'agent_status': audit.get('status'),
         'model_status': analysis.get('model_status'), 'recommendation': analysis.get('recommendation') or {},
         'risk_flags': analysis.get('risk_flags') or [], 'completed_at': assessment.get('completed_at'),
+        'external_due_diligence': {
+            'provider': external.get('provider'), 'status': external.get('status'), 'searched_at': external.get('searched_at'),
+            'identity_confidence': external.get('identity_confidence'), 'findings': external.get('findings') or [],
+        },
+    }
+
+
+def _external_reviewer_decisions(assessment: dict, raw_decisions: list[dict] | None) -> tuple[list[dict], dict]:
+    """Bind reviewer actions to the exact Exa findings in this assessment."""
+    external = ((assessment.get('report') or {}).get('external_due_diligence') or {})
+    findings = [item for item in (external.get('findings') or []) if isinstance(item, dict)]
+    status = str(external.get('status') or '')
+    supplied = {str(item.get('finding_id') or ''): item for item in (raw_decisions or []) if isinstance(item, dict)}
+    reviews: list[dict] = []
+    for finding in findings:
+        finding_id = str(finding.get('finding_id') or '')
+        decision = supplied.get(finding_id) or {}
+        value = str(decision.get('decision') or '').strip()
+        note = str(decision.get('note') or '').strip()
+        if value not in {'included', 'excluded'}:
+            raise ValueError('每条 Exa 外部风险线索均须由信用审核专员选择纳入评判或不纳入')
+        if not note:
+            raise ValueError('请为每条 Exa 外部风险线索填写核验依据或处理说明')
+        reviews.append({
+            'finding_id': finding_id, 'code': str(finding.get('code') or ''), 'severity': str(finding.get('severity') or 'mid'),
+            'title': str(finding.get('title') or ''), 'identity_confidence': str(finding.get('identity_confidence') or ''),
+            'decision': value, 'note': note[:1000], 'source_url': str((finding.get('source') or {}).get('url') or '')[:1000],
+        })
+    if findings and len(supplied) != len({str(item.get('finding_id') or '') for item in findings}):
+        raise ValueError('Exa 外部风险线索的审核结果不完整，请逐条处理')
+    return reviews, {
+        'has_findings': bool(findings), 'requires_manual': status in {'unavailable', 'rate_limited', 'partial'},
+        'status': status,
     }
 
 
 def record_credit_reviewer_decision(case_id: str, assessment: dict, conditions: dict, reviewer_note: str,
-                                    mode: str, actor: dict, business_type: str='') -> dict:
+                                    mode: str, actor: dict, business_type: str='', external_decisions: list[dict] | None=None) -> dict:
     """Record how a reviewer adopted or overrode a production assessment.
 
     ``agent_recommended`` is allowed only for a complete, non-blocked production
@@ -735,7 +793,7 @@ def record_credit_reviewer_decision(case_id: str, assessment: dict, conditions: 
     assessment snapshot and requires an explicit accountable reason.
     """
     from .services.credit import normalize_conditions
-    if actor.get('role') not in {'reviewer', 'admin'}:
+    if actor.get('role') != 'reviewer':
         raise ValueError('仅信用审核专员可确认或修订信用审核建议')
     if mode not in {'agent_recommended', 'reviewer_adjusted', 'manual_override'}:
         raise ValueError('信用审核处理方式无效')
@@ -743,6 +801,7 @@ def record_credit_reviewer_decision(case_id: str, assessment: dict, conditions: 
         raise ValueError('请先运行本案件的信用审核评估，再确认或修订条件')
     snapshot = _assessment_snapshot(assessment)
     analysis = (assessment.get('report') or {}).get('assessment') or {}
+    external_reviews, external_state = _external_reviewer_decisions(assessment, external_decisions)
     production_ready = (assessment.get('status') == 'done' and snapshot.get('runtime_mode') == 'production'
                         and analysis.get('model_status') == 'ready_for_reviewer'
                         and not any(item.get('level') == 'high' for item in analysis.get('risk_flags') or []))
@@ -750,6 +809,8 @@ def record_credit_reviewer_decision(case_id: str, assessment: dict, conditions: 
     final_conditions = normalize_conditions(conditions)
     recommendation = normalize_conditions(analysis.get('recommendation') or {}) if analysis.get('recommendation') else {}
     if mode == 'agent_recommended':
+        if external_state['requires_manual']:
+            raise ValueError('本次 Exa 公开尽调存在待核验线索或服务不可用，须由审核专员填写处理依据后再提交')
         if not production_ready:
             raise ValueError('该评估尚不能直接提交审批；请补充材料，或填写人工修订依据后再提交')
         if final_conditions != recommendation:
@@ -763,6 +824,7 @@ def record_credit_reviewer_decision(case_id: str, assessment: dict, conditions: 
             # A failed/blocked assessment is a manual fallback, not an ordinary
             # fine-tuning of a trustworthy recommendation.
             mode = 'manual_override'
+    snapshot['external_reviews'] = external_reviews
     now = time.time()
     with _lock, _conn() as c:
         row = c.execute('SELECT status FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
@@ -773,9 +835,10 @@ def record_credit_reviewer_decision(case_id: str, assessment: dict, conditions: 
         business = str(business_type or '').strip()
         if business and business not in {'TKM', 'TKP', '模具制作', '注塑组件制造', '一般'}:
             raise ValueError('业务类型无效')
-        fields = '''conditions_json=?,assessment_id=?,assessment_snapshot_json=?,review_mode=?,reviewer_note=?,reviewed_by=?,reviewed_at=?,updated_at=?'''
+        fields = '''conditions_json=?,assessment_id=?,assessment_snapshot_json=?,external_review_json=?,external_reviewed_by=?,external_reviewed_at=?,review_mode=?,reviewer_note=?,reviewed_by=?,reviewed_at=?,updated_at=?'''
         values: list[Any] = [json.dumps(final_conditions, ensure_ascii=False), assessment.get('assessment_id') or '',
-                             json.dumps(snapshot, ensure_ascii=False), mode, note[:2000], actor.get('id'), now, now]
+                             json.dumps(snapshot, ensure_ascii=False), json.dumps(external_reviews, ensure_ascii=False), actor.get('id'), now,
+                             mode, note[:2000], actor.get('id'), now, now]
         if business:
             fields += ',business_type=?'; values.append(business)
         values.append(case_id)
@@ -785,19 +848,23 @@ def record_credit_reviewer_decision(case_id: str, assessment: dict, conditions: 
 
 
 def submit_credit_case(case_id: str, actor: dict) -> dict:
-    if actor.get('role') not in {'reviewer', 'admin'}:
+    """Make the credit-reviewer's confirmed decision effective.
+
+    Credit conditions and the reviewer-confirmed public-web evidence are a
+    single review responsibility.  Repeating that approval at director/final
+    stages creates a second, mostly identical queue.  Those roles instead see
+    the frozen evidence package when approving the concrete contract, where
+    they can return it for revision or reject it.
+    """
+    if actor.get('role') != 'reviewer':
         raise ValueError('仅信用审核专员可提交信用审核评估')
-    # Fetch the published route before acquiring the case-write lock.  The
-    # storage backend intentionally uses a non-reentrant lock, so querying a
-    # versioned policy from within that critical section would deadlock.
-    route_catalog = get_credit_route_version()
     with _lock, _conn() as c:
-        row = c.execute('SELECT status,assigned_to,review_mode,reviewer_note,assessment_id,assessment_snapshot_json,conditions_json FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
+        row = c.execute('SELECT status,assigned_to,review_mode,reviewer_note,assessment_id,assessment_snapshot_json,external_review_json,conditions_json FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
         if not row:
             raise ValueError('信用审核案件不存在')
         if row['status'] not in {'draft', 'returned_to_reviewer'}:
             raise ValueError('仅草稿或退回审核专员的信用审核案件可提交审批')
-        if row['assigned_to'] and row['assigned_to'] != actor.get('id') and actor.get('role') != 'admin':
+        if row['assigned_to'] and row['assigned_to'] != actor.get('id'):
             raise ValueError('该信用审核案件已自动分派给其他信用审核专员，请由负责人处理')
         if row['review_mode'] not in {'agent_recommended', 'reviewer_adjusted', 'manual_override'} or not row['assessment_id']:
             raise ValueError('请先确认 Agent 建议；若建议不适用或 Agent 异常，请填写人工修订依据后再提交审批')
@@ -810,10 +877,20 @@ def submit_credit_case(case_id: str, actor: dict) -> dict:
             if not recommended or normalize_conditions(json.loads(row['conditions_json'] or '{}')) != normalize_conditions(recommended):
                 raise ValueError('提交条件已偏离 Agent 建议，请填写审核专员修订依据后重新确认')
         now = time.time()
-        conditions = json.loads(row['conditions_json'] or '{}')
-        route = _evaluate_credit_route(route_catalog, conditions, row['review_mode'])
-        c.execute("UPDATE credit_cases SET status='pending_director',assigned_to=?,submitted_at=?,route_version=?,route_snapshot_json=?,return_note='',return_target='',returned_by=NULL,returned_at=NULL,updated_at=? WHERE case_id=?",
-                  (_role_assignee(c, 'director'), now, route['version'], json.dumps(route, ensure_ascii=False), now, case_id))
+        route = {
+            'version': 'reviewer-direct-v1', 'requires_final': False,
+            'reasons': ['信用审核专员已确认；已纳入的外部公开信息将随合同审查提供给后续审批人。'],
+            'config': {'owner': 'reviewer', 'contract_stage_review': True},
+        }
+        # A newly effective version supersedes the prior customer decision;
+        # already-reviewed contracts keep their historic snapshot and must be
+        # reviewed again before signing if the version becomes stale.
+        c.execute("UPDATE credit_cases SET status='superseded',updated_at=? WHERE customer_key=? AND status='approved'", (now, c.execute('SELECT customer_key FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()['customer_key']))
+        c.execute("""UPDATE credit_cases SET status='approved',assigned_to=NULL,submitted_at=?,route_version=?,route_snapshot_json=?,
+                                      decision_note=?,decided_by=?,decided_at=?,return_note='',return_target='',returned_by=NULL,returned_at=NULL,updated_at=?
+                     WHERE case_id=?""",
+                  (now, route['version'], json.dumps(route, ensure_ascii=False), '信用审核专员已确认授信条件及外部公开信息处理结果。',
+                   actor.get('id'), now, now, case_id))
     return get_credit_case(case_id)
 
 def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> dict:
@@ -826,7 +903,7 @@ def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> d
         if not case:
             raise ValueError('信用审核案件不存在')
         role = actor.get('role')
-        if case['assigned_to'] and case['assigned_to'] != actor.get('id') and role != 'admin':
+        if case['assigned_to'] and case['assigned_to'] != actor.get('id'):
             raise ValueError('该信用审核案件已自动分派给其他负责人，请由负责人处理')
         if case['status'] == 'pending_director':
             if role != 'director':
@@ -843,8 +920,11 @@ def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> d
             else:
                 route = json.loads(case['route_snapshot_json'] or '{}')
                 if route.get('requires_final'):
+                    final_assignee = _role_assignee(c, 'final_approver')
+                    if not final_assignee:
+                        raise ValueError('尚未配置启用的集团财务总监（最终审批人），请由系统管理员先完成账号配置')
                     c.execute("UPDATE credit_cases SET status='pending_final',assigned_to=?,director_note=?,director_by=?,director_at=?,updated_at=? WHERE case_id=?",
-                              (_role_assignee(c, 'admin'), note.strip()[:2000], actor.get('id'), now, now, case_id))
+                              (final_assignee, note.strip()[:2000], actor.get('id'), now, now, case_id))
                 else:
                     c.execute("UPDATE credit_cases SET status='superseded',updated_at=? WHERE customer_key=? AND status='approved'", (now, case['customer_key']))
                     c.execute('UPDATE credit_cases SET status=?,assigned_to=NULL,director_note=?,director_by=?,director_at=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE case_id=?',
@@ -852,7 +932,7 @@ def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> d
         else:
             if case['status'] != 'pending_final':
                 raise ValueError('仅待最终审批的信用审核案件可作出决定')
-            if role != 'admin':
+            if role != 'final_approver':
                 raise ValueError('该信用审核申请须由集团财务总监最终审批')
             now = time.time()
             if decision == 'approved':
@@ -872,7 +952,7 @@ def decide_credit_case(case_id: str, decision: str, note: str, actor: dict) -> d
 
 def resubmit_credit_case(case_id: str, actor: dict) -> dict:
     """Return a business-material loop to the reviewer queue without bypassing review."""
-    if actor.get('role') not in {'business', 'reviewer', 'admin'}:
+    if actor.get('role') not in {'business', 'reviewer'}:
         raise ValueError('当前角色不能重新提交信用审核申请')
     with _lock, _conn() as c:
         row = c.execute('SELECT status,created_by FROM credit_cases WHERE case_id=?', (case_id,)).fetchone()
@@ -1197,11 +1277,15 @@ def update_user(user_id: str, display_name=None, role=None, active=None, passwor
 
 
 def active_admin_count(exclude_user_id: str='') -> int:
+    return active_role_count('admin', exclude_user_id)
+
+
+def active_role_count(role: str, exclude_user_id: str='') -> int:
     with _lock, _conn() as c:
-        sql = "SELECT COUNT(*) AS n FROM users WHERE role='admin' AND active=1"
-        args: tuple[str, ...] = ()
+        sql = 'SELECT COUNT(*) AS n FROM users WHERE role=? AND active=1'
+        args: tuple[str, ...] = (role,)
         if exclude_user_id:
-            sql += ' AND id<>?'; args = (exclude_user_id,)
+            sql += ' AND id<>?'; args = (role, exclude_user_id)
         return int(c.execute(sql, args).fetchone()['n'])
 
 
@@ -1237,10 +1321,13 @@ def _case_event(c, case_id: str, event_type: str, message: str, actor: dict | No
 TASK_RESPONSIBLE_ROLE = {
     'credit_required': 'business', 'document_required': 'business', 'revision_required': 'business',
     'material': 'business', 'legal_review': 'reviewer', 'approval': 'director',
-    'final_approval': 'admin',
+    'final_approval': 'final_approver',
 }
 
-ROLE_DISPLAY = {'business': '业务申请人', 'reviewer': '信用审核专员', 'director': '财务审批主管', 'admin': '集团财务总监'}
+ROLE_DISPLAY = {
+    'business': '业务申请人', 'reviewer': '信用审核专员', 'director': '财务审批主管',
+    'final_approver': '集团财务总监 / 最终审批人', 'admin': '系统管理员',
+}
 
 
 def _responsibility(task_type: str='', stage: str='') -> str:
@@ -1249,7 +1336,7 @@ def _responsibility(task_type: str='', stage: str='') -> str:
     return {
         'awaiting_credit': 'business', 'draft': 'business', 'ai_review': 'system',
         'legal_review': 'reviewer', 'awaiting_business': 'business', 'approval': 'director',
-        'final_approval': 'admin', 'ready_to_sign': 'business', 'archived': 'system',
+        'final_approval': 'final_approver', 'ready_to_sign': 'business', 'archived': 'system',
     }.get(stage, 'system')
 
 
@@ -1411,7 +1498,7 @@ def list_customer_workspaces(actor: dict, limit: int=200) -> list[dict]:
 
     credit_role = {
         'draft': 'reviewer', 'returned_to_reviewer': 'reviewer', 'returned_to_business': 'business',
-        'pending_director': 'director', 'pending_final': 'admin', 'approved': 'business',
+        'pending_director': 'director', 'pending_final': 'final_approver', 'approved': 'business',
         'rejected': 'system', 'superseded': 'system',
     }
     groups: dict[str, dict] = {}
@@ -1459,6 +1546,30 @@ def get_customer_workspace(customer_key: str, actor: dict) -> dict | None:
         return None
     return next((item for item in list_customer_workspaces(actor, 500) if item['customer_key'] == key), None)
 
+def _case_route_snapshot(c, job_id: str) -> dict:
+    """Derive the current approval tier for a reviewed document version.
+
+    The tier is deliberately a derived value, not a stored one: it is
+    recomputed from the decrypted report plus the live disposition state
+    (finding actions, approval decisions, open material requests), so the UI
+    reflects the latest progress instead of a stale snapshot taken when the
+    review finished.  ``c`` is the caller's open connection — never acquire
+    the repository lock here.
+    """
+    if not job_id:
+        return {}
+    row = c.execute('SELECT report_encrypted FROM reviews WHERE id=?', (job_id,)).fetchone()
+    if not row or not row['report_encrypted']:
+        return {}
+    try:
+        report = decrypt_json(row['report_encrypted'])
+    except Exception:
+        return {}
+    findings = [dict(item) for item in c.execute('SELECT * FROM review_findings WHERE job_id=?', (job_id,))]
+    approvals = [dict(item) for item in c.execute('SELECT * FROM finding_approvals WHERE job_id=?', (job_id,))]
+    open_materials = int(c.execute("SELECT COUNT(*) AS n FROM material_requests WHERE job_id=? AND status='open'", (job_id,)).fetchone()['n'] or 0)
+    return evaluate_case_route(report, findings=findings, approvals=approvals, open_materials=open_materials)
+
 def get_case_center(case_id: str, actor: dict | None=None) -> dict | None:
     init_db()
     with _lock, _conn() as c:
@@ -1478,7 +1589,7 @@ def get_case_center(case_id: str, actor: dict | None=None) -> dict | None:
         for doc in item['documents']:
             doc['is_current_version'] = bool(current_job_id and doc.get('job_id') == current_job_id)
         task_where = 'WHERE case_id=?'; task_params: list[Any] = [case_id]
-        if actor and actor.get('role') == 'director':
+        if actor and actor.get('role') in {'director', 'final_approver'}:
             task_where += " AND (assignee_id=? OR task_type='approval')"; task_params.append(actor.get('id'))
         item['tasks'] = [dict(task) for task in c.execute(f'SELECT * FROM workflow_tasks {task_where} ORDER BY CASE status WHEN "open" THEN 0 ELSE 1 END, due_at, created_at DESC', task_params)]
         current_task = next((task for task in item['tasks'] if task.get('status') == 'open'), None)
@@ -1516,6 +1627,9 @@ def get_case_center(case_id: str, actor: dict | None=None) -> dict | None:
                 if valid_to and valid_to < now:
                     reasons.append('绑定的信用审核版本已过有效期')
                 item['credit_binding'] = {'case_id': bound_id, 'version': int(credit_row['version']), 'stale': bool(reasons), 'reasons': reasons}
+        # 差异化审批路径：派生自当前版本报告与处置状态，随审核员处理进度
+        # 实时变化（例如全部风险闭环后档位可从 standard 降为 fast）。
+        item['route_snapshot'] = _case_route_snapshot(c, current_job_id)
         return item
 
 def customer_headroom(customer_key: str, actor: dict, simulated_amount: float = 0) -> dict | None:
@@ -1755,6 +1869,7 @@ ACTION_TRANSITIONS = {
     'final_approve_for_signing': ({'final_approval'}, 'ready_to_sign'),
     'return_to_reviewer': ({'approval', 'final_approval'}, 'legal_review'),
     'return_to_business': ({'approval', 'final_approval'}, 'awaiting_business'),
+    'reject': ({'approval', 'final_approval'}, 'cancelled'),
     'archive': ({'ready_to_sign'}, 'archived'),
     'cancel': (CASE_STAGES - {'archived', 'cancelled'}, 'cancelled'),
 }
@@ -1776,12 +1891,13 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
     if action not in ACTION_TRANSITIONS:
         raise ValueError('不支持的案件动作')
     action_roles = {
-        'claim': {'reviewer', 'admin'}, 'request_material': {'reviewer', 'admin'},
-        'submit_revision': {'business', 'reviewer', 'admin'}, 'submit_approval': {'reviewer', 'admin'},
-        'ready_for_signing': {'reviewer', 'admin'}, 'approve_for_signing': {'director', 'admin'},
-        'escalate_final': {'director', 'admin'}, 'final_approve_for_signing': {'admin'},
-        'return_to_reviewer': {'director', 'admin'}, 'return_to_business': {'director', 'admin'}, 'archive': {'reviewer', 'admin'},
-        'cancel': {'business', 'reviewer', 'admin'},
+        'claim': {'reviewer'}, 'request_material': {'reviewer'},
+        'submit_revision': {'business', 'reviewer'}, 'submit_approval': {'reviewer'},
+        'ready_for_signing': {'reviewer'}, 'approve_for_signing': {'director'},
+        'escalate_final': {'director'}, 'final_approve_for_signing': {'final_approver'},
+        'return_to_reviewer': {'director', 'final_approver'}, 'return_to_business': {'director', 'final_approver'},
+        'reject': {'director', 'final_approver'},
+        'archive': {'business'}, 'cancel': {'business', 'reviewer'},
     }
     if actor.get('role') not in action_roles[action]:
         raise ValueError('当前角色无权执行该案件动作')
@@ -1794,6 +1910,10 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
         current = row['current_stage'] or row['status']; allowed, target = ACTION_TRANSITIONS[action]
         if current not in allowed:
             raise ValueError(f'案件当前处于“{current}”，不能执行“{action}”')
+        if action in {'return_to_reviewer', 'return_to_business', 'reject'} and not note.strip():
+            raise ValueError('退回或驳回合同必须填写处理意见')
+        if action == 'escalate_final' and not _role_assignee(c, 'final_approver'):
+            raise ValueError('尚未配置启用的集团财务总监（最终审批人），请由系统管理员先完成账号配置')
         task_for_action = {
             'request_material': 'legal_review', 'submit_approval': 'legal_review',
             'ready_for_signing': 'legal_review', 'escalate_final': 'approval',
@@ -1801,8 +1921,9 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
             'final_approve_for_signing': 'final_approval',
             'return_to_reviewer': 'approval' if current == 'approval' else 'final_approval',
             'return_to_business': 'approval' if current == 'approval' else 'final_approval',
+            'reject': 'approval' if current == 'approval' else 'final_approval',
         }.get(action)
-        if task_for_action and actor.get('role') != 'admin':
+        if task_for_action:
             owner = c.execute('''SELECT assignee_id FROM workflow_tasks
                                  WHERE case_id=? AND task_type=? AND status='open'
                                  ORDER BY created_at DESC LIMIT 1''', (case_id, task_for_action)).fetchone()
@@ -1827,14 +1948,23 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
                 raise ValueError('仍有未完成或未通过的条款审批/补充材料事项，不能进入可签约状态')
             required_roles = {item['required_role'] for item in required}
             if action == 'approve_for_signing':
-                if 'admin' in required_roles and actor.get('role') != 'admin':
+                if 'final_approver' in required_roles and actor.get('role') != 'final_approver':
                     raise ValueError('案件含集团财务总监级例外，须由集团财务总监批准可签约')
                 if required_roles == {'director'} and actor.get('role') != 'director':
                     raise ValueError('案件须由财务审批主管批准可签约')
+            # 差异化审批路径强制校验：主管不能绕过总监终审直接放行；
+            # 审核专员只有在快速路径档位才可直放，否则必须提交主管复核。
+            route = _case_route_snapshot(c, current_job_id)
+            if action == 'approve_for_signing' and route.get('requires_final'):
+                reasons = '；'.join(route.get('reasons') or []) or '按差异化审批路径要求'
+                raise ValueError(f'本合同命中集团财务总监终审条件（{reasons}），请先提交最终审批，由集团财务总监批准可签约。')
+            if action == 'ready_for_signing' and route.get('tier') != 'fast':
+                reasons = '；'.join(route.get('reasons') or []) or '当前版本仍有未闭环事项'
+                raise ValueError(f'当前不满足快速放行条件（{reasons}），请提交主管复核。')
         now = time.time()
         fields = "status=?,current_stage=?,updated_at=?"; values: list[Any] = [target, target, now]
         if action == 'claim':
-            if actor.get('role') not in {'reviewer', 'admin'}:
+            if actor.get('role') != 'reviewer':
                 raise ValueError('仅信用审核专员可领取案件')
             fields += ',assigned_to=?'; values.append(actor.get('id'))
         if action == 'archive':
@@ -1861,7 +1991,7 @@ def transition_case(case_id: str, action: str, actor: dict, note: str='', assign
         elif action == 'return_to_business':
             c.execute("UPDATE workflow_tasks SET status='completed',completed_by=?,completed_at=? WHERE case_id=? AND status='open' AND task_type IN ('approval','final_approval')", (actor.get('id'), now, case_id))
             _task(c, case_id, 'material', '主管/最终审批退回业务补充材料', note or '请按审批意见补充材料或上传修订合同。', row['created_by'], actor, row['due_at'])
-        elif action in {'archive', 'cancel'}:
+        elif action in {'archive', 'cancel', 'reject'}:
             c.execute("UPDATE workflow_tasks SET status='completed',completed_by=?,completed_at=? WHERE case_id=? AND status='open'", (actor.get('id'), now, case_id))
         _case_event(c, case_id, f'case.{action}', note or f'执行案件动作：{action}', actor, {'from': current, 'to': target})
     return get_case_center(case_id, actor)
@@ -1886,8 +2016,6 @@ def my_work_items(actor: dict, limit: int=100) -> list[dict]:
     with _lock, _conn() as c:
         if actor.get('role') == 'business':
             condition = '(t.assignee_id=? OR c.created_by=?)'; params: list[Any] = [actor.get('id'), actor.get('id')]
-        elif actor.get('role') in {'admin'}:
-            condition = '1=1'; params = []
         else:
             condition = '(t.assignee_id=? OR t.assignee_id IS NULL)'; params = [actor.get('id')]
         rows = c.execute(f'''SELECT t.*,c.customer_name,c.current_stage,c.priority,c.request_note,
@@ -2032,7 +2160,7 @@ def list_workbox(actor: dict, bucket: str='todo', limit: int=200) -> list[dict]:
                                         WHERE {credit_access} AND cc.status NOT IN ('draft','approved','rejected','superseded') AND cc.assigned_to<>?
                                         ORDER BY cc.updated_at DESC LIMIT ?''', (*credit_params, actor_id, max_items)).fetchall()
             for row in credit_rows:
-                item = dict(row); owner_role = {'returned_to_business':'business','returned_to_reviewer':'reviewer','pending_director':'director','pending_final':'admin'}.get(item['status'], 'system')
+                item = dict(row); owner_role = {'returned_to_business':'business','returned_to_reviewer':'reviewer','pending_director':'director','pending_final':'final_approver'}.get(item['status'], 'system')
                 item.update({'task_id': f"progress-credit:{item['case_id']}", 'bucket': bucket, 'source_type': 'credit', 'target_id': item['case_id'],
                              'current_stage': item['status'], 'priority': 'normal', 'filename': '', 'kind_label': '信用审核', 'title': '信用审核正在推进',
                              'detail': item.get('request_note') or '等待当前责任人处理。', 'action_hint': f"等待 {ROLE_DISPLAY.get(owner_role, '系统')} · {item.get('owner_name') or ROLE_DISPLAY.get(owner_role, '系统')} 处理。",
@@ -2073,6 +2201,9 @@ def create_pending(job_id, filename, path, actor=None, business_type='', assigne
         'case_id': credit_case['case_id'], 'customer_name': credit_case['customer_name'],
         'version': credit_case['version'], 'conditions': credit_case['conditions'],
         'approved_at': credit_case.get('decided_at'),
+        'review_mode': credit_case.get('review_mode') or '', 'reviewer_note': credit_case.get('reviewer_note') or '',
+        'reviewed_at': credit_case.get('reviewed_at'),
+        'external_reviews': [item for item in (credit_case.get('external_reviews') or []) if item.get('decision') == 'included'],
     }
     existing_case_id = (case_id or '').strip()
     with _lock, _conn() as c:
@@ -2182,7 +2313,7 @@ CASE_PRIORITIES = {'low', 'normal', 'high', 'urgent'}
 
 def list_reviewers():
     with _lock, _conn() as c:
-        rows = c.execute("SELECT id,display_name,role FROM users WHERE active=1 AND role IN ('admin','reviewer') ORDER BY display_name").fetchall()
+        rows = c.execute("SELECT id,display_name,role FROM users WHERE active=1 AND role='reviewer' ORDER BY display_name").fetchall()
         return [dict(r) for r in rows]
 
 def get_case(job_id: str):
@@ -2203,7 +2334,7 @@ def list_findings(job_id):
 def list_approvals(job_id: str, actor: dict | None=None):
     with _lock, _conn() as c:
         where = 'WHERE job_id=?'; values = [job_id]
-        if actor and actor.get('role') == 'director':
+        if actor and actor.get('role') in {'director', 'final_approver'}:
             where += ' AND required_role=?'; values.append(actor['role'])
         return [dict(r) for r in c.execute(f'SELECT * FROM finding_approvals {where} ORDER BY created_at', values)]
 
@@ -2216,7 +2347,7 @@ def decide_approval(job_id: str, approval_id: str, decision: str, note: str, act
         row = c.execute('SELECT * FROM finding_approvals WHERE approval_id=? AND job_id=?', (approval_id, job_id)).fetchone()
         if not row:
             raise ValueError('审批任务不存在')
-        if actor.get('role') not in {'admin', row['required_role']}:
+        if actor.get('role') != row['required_role']:
             raise ValueError('当前角色无权处理该审批')
         now = time.time()
         c.execute('UPDATE finding_approvals SET status=?,decision_note=?,actor_id=?,decided_at=? WHERE approval_id=?',
@@ -2224,6 +2355,36 @@ def decide_approval(job_id: str, approval_id: str, decision: str, note: str, act
         finding_status = 'approved' if decision == 'approved' else ('returned' if decision == 'changes_requested' else 'rejected')
         c.execute('UPDATE review_findings SET action_status=?,updated_at=? WHERE finding_id=?', (finding_status, now, row['finding_id']))
     return {'approval_id': approval_id, 'status': decision}
+
+
+def decide_approvals_batch(job_id: str, decision: str, note: str, actor: dict) -> dict:
+    """Apply one accountable decision to all pending same-level exceptions.
+
+    The normalized approval and finding records remain individual for audit,
+    while the approver sees one case-level exception package instead of
+    repeating the same operation for every clause.
+    """
+    if decision not in {'approved', 'rejected', 'changes_requested'}:
+        raise ValueError('审批决定无效')
+    if not note.strip():
+        raise ValueError('请填写审批意见')
+    role = actor.get('role') or ''
+    if role not in {'director', 'final_approver'}:
+        raise ValueError('当前角色无权处理条款例外审批包')
+    with _lock, _conn() as c:
+        rows = c.execute('''SELECT approval_id,finding_id FROM finding_approvals
+                          WHERE job_id=? AND required_role=? AND status='pending'
+                          ORDER BY created_at''', (job_id, role)).fetchall()
+        if not rows:
+            raise ValueError('当前没有待处理的同级条款例外审批')
+        now = time.time()
+        finding_status = 'approved' if decision == 'approved' else ('returned' if decision == 'changes_requested' else 'rejected')
+        for row in rows:
+            c.execute('''UPDATE finding_approvals SET status=?,decision_note=?,actor_id=?,decided_at=?
+                         WHERE approval_id=?''', (decision, note.strip(), actor.get('id'), now, row['approval_id']))
+            c.execute('UPDATE review_findings SET action_status=?,updated_at=? WHERE finding_id=?',
+                      (finding_status, now, row['finding_id']))
+    return {'count': len(rows), 'status': decision, 'required_role': role}
 
 def list_material_requests(job_id: str):
     with _lock, _conn() as c:
@@ -2271,33 +2432,6 @@ def resolve_material_request(job_id: str, request_id: str, note: str, actor: dic
         c.execute('UPDATE material_requests SET status=?,detail=?,resolved_by=?,resolved_at=? WHERE request_id=?',
                   ('resolved', note.strip() or '已补充并确认', actor.get('id'), time.time(), request_id))
     return {'request_id': request_id, 'status': 'resolved'}
-
-def list_knowledge(rule_id='', limit=3):
-    with _lock, _conn() as c:
-        if rule_id:
-            rows = c.execute('SELECT * FROM clause_knowledge WHERE rule_id=? ORDER BY created_at DESC LIMIT ?', (rule_id, limit)).fetchall()
-        else:
-            rows = c.execute('SELECT * FROM clause_knowledge ORDER BY created_at DESC LIMIT ?', (limit,)).fetchall()
-        return [dict(r) for r in rows]
-
-def similar_knowledge(job_id: str, finding_id: str, limit=3):
-    """Return prior human-adopted examples relevant to this finding and business type."""
-    with _lock, _conn() as c:
-        finding = c.execute('SELECT rule_id FROM review_findings WHERE finding_id=? AND job_id=?', (finding_id, job_id)).fetchone()
-        review = c.execute('SELECT business_type FROM reviews WHERE id=?', (job_id,)).fetchone()
-        if not finding:
-            raise ValueError('风险项不存在')
-        business_type = (review['business_type'] if review else '') or ''
-        rows = c.execute('''SELECT * FROM clause_knowledge
-                          WHERE rule_id=? AND (business_type=? OR business_type='' OR ?='')
-                          ORDER BY created_at DESC LIMIT ?''',
-                         (finding['rule_id'], business_type, business_type, min(max(limit, 1), 3))).fetchall()
-        return [dict(row) for row in rows]
-
-def purge_knowledge_by_source(source_clause: str):
-    """Test-only cleanup helper; production cases are intentionally retained as knowledge."""
-    with _lock, _conn() as c:
-        c.execute('DELETE FROM clause_knowledge WHERE source_clause=?', (source_clause,))
 
 def _version_field_changes(baseline_fields: dict | None, current_fields: dict | None):
     """Return the small set of commercial fields that an approver needs to compare.
@@ -2409,20 +2543,6 @@ def record_finding_action(job_id: str, finding_id: str, action: str, reason: str
         now=time.time(); status={'adopt':'adopted','ignore':'ignored','edit':'edited','approve':'approved','reject':'rejected'}[action]
         c.execute('INSERT INTO review_actions VALUES (?,?,?,?,?,?,?,?)',(uuid.uuid4().hex,finding_id,action,reason.strip(),edited_suggestion,(actor or {}).get('id'),(actor or {}).get('role'),now))
         c.execute('UPDATE review_findings SET action_status=?,suggestion=COALESCE(NULLIF(?,""),suggestion),updated_at=? WHERE finding_id=?',(status,edited_suggestion,now,finding_id))
-        if action in {'adopt', 'edit'}:
-            report_row = c.execute('SELECT business_type,report_encrypted FROM reviews WHERE id=?', (job_id,)).fetchone()
-            source_clause = ''
-            source_ref = ''
-            if report_row and report_row['report_encrypted']:
-                try:
-                    report = decrypt_json(report_row['report_encrypted'])
-                    clause = next((x for x in report.get('clauses', []) if x.get('id') == f['clause_id']), {})
-                    source_clause, source_ref = clause.get('text', ''), clause.get('source_ref', '')
-                except Exception:
-                    pass
-            c.execute('INSERT INTO clause_knowledge VALUES (?,?,?,?,?,?,?,?,?,?)',
-                      (uuid.uuid4().hex, f['rule_id'], report_row['business_type'] if report_row else '', source_clause,
-                       source_ref, f['evidence'], edited_suggestion or f['suggestion'], status, actor.get('id'), now))
     return get_finding(finding_id)
 
 def get_finding(finding_id):

@@ -9,7 +9,7 @@ import { stageInfo, workItemAction } from '../components/workflow'
 
 const { Text, Title } = Typography
 type Bucket = 'todo' | 'in_progress' | 'draft' | 'done'
-// 审批决策与工作台的边界：需要 director/admin 作出决定的信用审核
+// 审批决策与工作台的边界：需要 director/final_approver 作出决定的信用审核
 // （pending_director/pending_final）和合同（approval/final_approval）
 // 统一在审批中心处理；工作台只保留发起、推进、草稿与历史全景。
 const DECISION_STAGES = ['pending_director', 'pending_final', 'approval', 'final_approval']
@@ -30,11 +30,11 @@ const bucketCopy: Record<Bucket, { label: string; empty: string }> = {
   draft: { label: '未提交草稿', empty: '没有未提交草稿。' },
   done: { label: '我的记录', empty: '暂无已办记录。' },
 }
-const roleTitle: Record<string, string> = { business: '我的业务', reviewer: '我的待办', director: '我的工作台', admin: '我的工作台' }
+const roleTitle: Record<string, string> = { business: '我的业务', reviewer: '我的待办', director: '我的工作台', final_approver: '我的工作台', admin: '系统治理' }
 const stageLabel: Record<string, string> = {
   draft: '草稿', awaiting_credit: '等待有效信用审核', ai_review: '系统审查中', legal_review: '审核员复核', awaiting_business: '待业务补充材料', approval: '待主管审批', final_approval: '待最终审批', ready_to_sign: '可签约', archived: '已归档', returned_to_reviewer: '退回审核专员', returned_to_business: '待业务补充材料', pending_director: '待主管复核', pending_final: '待最终审批', approved: '已生效', rejected: '已拒绝', superseded: '历史版本',
 }
-const roleLabel: Record<string, string> = { business: '业务申请人', reviewer: '信用审核专员', director: '财务审批主管', admin: '集团财务总监', system: '系统' }
+const roleLabel: Record<string, string> = { business: '业务申请人', reviewer: '信用审核专员', director: '财务审批主管', final_approver: '集团财务总监', admin: '系统管理员', system: '系统' }
 const priorityLabel: Record<string, string> = { urgent: '紧急', high: '高优先级', normal: '普通', low: '低' }
 const priorityWeight = (value: string) => ({ urgent: 0, high: 1, normal: 2, low: 3 } as Record<string, number>)[value] ?? 4
 const roleGuidance: Record<string, { label: string; summary: string; steps: Array<[string, string]> }> = {
@@ -50,7 +50,7 @@ const roleGuidance: Record<string, { label: string; summary: string; steps: Arra
     label: '财务审批主管', summary: '审批决策统一在审批中心处理；本工作台展示你正在推进的事项、草稿与历史记录。',
     steps: [['01', '进入审批中心处理待决定事项',], ['02', '比较申请条件、Agent 建议与前序意见',], ['03', '明确批准、退回或提交最终审批',]],
   },
-  admin: {
+  final_approver: {
     label: '最终审批人', summary: '重大例外与最终边界在审批中心处理；本工作台保留推进中事项与已办记录。',
     steps: [['01', '进入审批中心处理最终审批事项',], ['02', '查看前序意见和完整依据',], ['03', '作出批准、退回或拒绝决定',]],
   },
@@ -63,7 +63,7 @@ function actionLabel(item: WorkboxItem) {
 export default function WorkbenchPage({ onCreateContract, onCreateCredit, onOpenCase, onOpenCredit, onNavigate, canCreateContract, canCreateCredit }: Props) {
   const { user } = useAuth()
   const role = user?.role || 'business'
-  const decisionRole = role === 'director' || role === 'admin'
+  const decisionRole = role === 'director' || role === 'final_approver'
   const [items, setItems] = useState<Record<Bucket, WorkboxItem[]>>({ todo: [], in_progress: [], draft: [], done: [] })
   const [bucket, setBucket] = useState<Bucket>('todo')
   const [loading, setLoading] = useState(true)
@@ -77,7 +77,7 @@ export default function WorkbenchPage({ onCreateContract, onCreateCredit, onOpen
   }
   useEffect(() => { load() }, [])
 
-  // 审批决策（信用审核/合同放行）只在审批中心处理：工作台为 director/admin
+  // 审批决策（信用审核/合同放行）只在审批中心处理：工作台为 director/final_approver
   // 过滤掉决策阶段事项，并给出进入审批中心的提示，避免两处重复出现同一批待办。
   const decisionCount = decisionRole ? items.todo.filter(isDecisionStage).length : 0
   const todo = useMemo(() => {

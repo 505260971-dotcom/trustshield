@@ -13,13 +13,14 @@ type Settings = {
   rerank_base_url: string; rerank_model: string; rerank_api_key_configured: boolean
   embedding_enabled: boolean; embedding_allow_remote_financial_data: boolean
   embedding_base_url: string; embedding_model: string; embedding_dimensions: number; embedding_api_key_configured: boolean
+  external_due_diligence_enabled: boolean; external_due_diligence_recent_days: number; external_due_diligence_max_results: number; external_due_diligence_timeout_seconds: number
 }
 type Props = { onSaved?: () => void }
 
-const TEST_KINDS = ['llm', 'mask', 'rerank', 'embedding'] as const
+const TEST_KINDS = ['llm', 'mask', 'rerank', 'embedding', 'exa'] as const
 type TestKind = typeof TEST_KINDS[number]
 const KIND_LABELS: Record<TestKind, string> = {
-  llm: 'Agent 审查模型', mask: '合同脱敏模型', rerank: '证据精排模型', embedding: '语义召回模型',
+  llm: 'Agent 审查模型', mask: '合同脱敏模型', rerank: '证据精排模型', embedding: '语义召回模型', exa: 'Exa 公开信息尽调',
 }
 const SECRET_FIELDS = ['llm_api_key', 'mask_llm_api_key', 'rerank_api_key', 'embedding_api_key'] as const
 
@@ -59,7 +60,7 @@ export default function SettingsPage({ onSaved }: Props) {
     const values = form.getFieldsValue(true)
     setTesting(kind)
     try {
-      const field = { llm: 'llm', mask: 'mask_llm', rerank: 'rerank', embedding: 'embedding' }[kind]
+      const field = { llm: 'llm', mask: 'mask_llm', rerank: 'rerank', embedding: 'embedding', exa: 'exa' }[kind]
       const payload: Record<string, any> = {
         kind,
         api_base: values[`${field}_api_base`] || values[`${field}_base_url`] || '',
@@ -118,6 +119,15 @@ export default function SettingsPage({ onSaved }: Props) {
           <Form.Item name="embedding_model" label="模型名称"><Input placeholder="例如 qwen3.7-text-embedding" /></Form.Item>
           <Form.Item name="embedding_dimensions" label="向量维度"><InputNumber min={0} max={4096} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name="embedding_api_key" label={<Space>API Key {settings.embedding_api_key_configured && <Tag color="green">已配置</Tag>}</Space>}><Input.Password placeholder={settings.embedding_api_key_configured ? '已配置，留空保持不变' : '输入阿里百炼 API Key（DashScope 兼容模式）'} /></Form.Item>
+        </Card>
+      </Col>
+      <Col xs={24} xl={12}>
+        <Card title={<Space><SafetyCertificateOutlined />Exa 公开信息尽调</Space>} extra={<Button icon={<ExperimentOutlined />} loading={testing === 'exa'} onClick={() => test('exa')}>测试连接</Button>}>
+          <Alert showIcon type="info" style={{marginBottom:12}} message="无需 API Key；仅发送企业全称、统一社会信用代码和注册地" description="不会发送合同、财报、CRM/ERP 敞口或联系人信息。匿名调用可能受到 Exa 免费额度限制；限流时会要求审核专员人工核验，绝不会显示为“无风险”。"/>
+          <Form.Item name="external_due_diligence_enabled" label="启用 Exa 公开尽调" valuePropName="checked"><Switch checkedChildren="开启" unCheckedChildren="关闭" /></Form.Item>
+          <Form.Item name="external_due_diligence_recent_days" label="第三方信用/经营动态检索窗口（天）"><InputNumber min={30} max={730} style={{width:'100%'}}/></Form.Item>
+          <Form.Item name="external_due_diligence_max_results" label="每类查询最大结果数"><InputNumber min={2} max={12} style={{width:'100%'}}/></Form.Item>
+          <Form.Item name="external_due_diligence_timeout_seconds" label="单次 MCP 超时（秒）"><InputNumber min={5} max={60} style={{width:'100%'}}/></Form.Item>
         </Card>
       </Col>
     </Row>

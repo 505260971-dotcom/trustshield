@@ -201,7 +201,7 @@ def get_financial_llm(temperature=0, max_tokens=1800, json_mode=True, timeout=45
         kw['model_kwargs'] = {'response_format': {'type': 'json_object'}}
     return ChatOpenAI(**kw)
 
-def get_mask_llm(temperature=0, max_tokens=1200, json_mode=True, timeout=30):
+def get_mask_llm(temperature=0, max_tokens=1200, json_mode=True, timeout=90):
     """返回仅用于本地隐私识别的小模型；未配置时返回 None。
 
     合同研判、字段抽取、翻译等业务语义任务统一使用 get_llm() 的强模型。

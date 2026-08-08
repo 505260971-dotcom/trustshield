@@ -83,10 +83,14 @@ class SettingsPatch(BaseModel):
     embedding_api_key: str | None = Field(default=None, max_length=500)
     embedding_model: str | None = Field(default=None, max_length=200)
     embedding_dimensions: int | None = Field(default=None, ge=0, le=4096)
+    external_due_diligence_enabled: bool | None = None
+    external_due_diligence_recent_days: int | None = Field(default=None, ge=30, le=730)
+    external_due_diligence_max_results: int | None = Field(default=None, ge=2, le=12)
+    external_due_diligence_timeout_seconds: int | None = Field(default=None, ge=5, le=60)
 
 
 class SettingsTest(BaseModel):
-    kind: str = Field(default='llm', pattern='^(llm|mask|rerank|embedding)$')
+    kind: str = Field(default='llm', pattern='^(llm|mask|rerank|embedding|exa)$')
     api_base: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, max_length=500)
     model: str | None = Field(default=None, max_length=200)
@@ -135,7 +139,8 @@ def login(body: LoginIn, request: Request):
 
 @router.get('/auth/me')
 def me(user=Depends(current_user)):
-    return {'user':user,'permissions':['*'] if user['role']=='admin' else sorted(__import__('app.services.security',fromlist=['PERMISSIONS']).PERMISSIONS[user['role']])}
+    permissions = __import__('app.services.security', fromlist=['PERMISSIONS']).PERMISSIONS
+    return {'user': user, 'permissions': sorted(permissions.get(user['role'], set()))}
 
 @router.get('/admin/users')
 def users(user=Depends(require('admin:users'))):
@@ -153,13 +158,14 @@ def create_user(body: UserIn, request: Request, user=Depends(require('admin:user
 def patch_user(user_id: str, body: UserPatch, request: Request, user=Depends(require('admin:users'))):
     target = store.get_user(user_id)
     if not target: raise HTTPException(404,'用户不存在')
-    if user_id==user['id'] and body.active is False: raise HTTPException(400,'不能停用当前登录管理员')
+    if user_id==user['id'] and body.active is False: raise HTTPException(400,'不能停用当前登录的系统管理员')
     if user_id==user['id'] and body.role is not None and body.role != 'admin':
-        raise HTTPException(400,'当前登录管理员不能将自己降级；请由另一位管理员操作')
-    will_remain_active_admin = (target.get('role') == 'admin' and bool(target.get('active'))
-                                and (body.role not in (None, 'admin') or body.active is False))
-    if will_remain_active_admin and store.active_admin_count(exclude_user_id=user_id) < 1:
-        raise HTTPException(400,'系统至少需要保留一名启用的集团财务总监 / 最终审批人')
+        raise HTTPException(400,'当前登录的系统管理员不能将自己降级；请由另一位系统管理员操作')
+    for protected_role, label in {'admin': '系统管理员', 'final_approver': '集团财务总监 / 最终审批人'}.items():
+        will_remove_last = (target.get('role') == protected_role and bool(target.get('active'))
+                            and (body.role not in (None, protected_role) or body.active is False))
+        if will_remove_last and store.active_role_count(protected_role, exclude_user_id=user_id) < 1:
+            raise HTTPException(400, f'系统至少需要保留一名启用的{label}')
     try: updated=store.update_user(user_id,**body.model_dump(exclude_unset=True))
     except ValueError as e: raise HTTPException(400,str(e))
     audit_fields = body.model_dump(exclude_unset=True)
@@ -175,8 +181,9 @@ def delete_user(user_id: str, request: Request, user=Depends(require('admin:user
     target = store.get_user(user_id)
     if not target:
         raise HTTPException(404,'用户不存在')
-    if target.get('role') == 'admin' and target.get('active') and store.active_admin_count(exclude_user_id=user_id) < 1:
-        raise HTTPException(400,'系统至少需要保留一名启用的集团财务总监 / 最终审批人')
+    if target.get('role') in {'admin', 'final_approver'} and target.get('active') and store.active_role_count(target['role'], exclude_user_id=user_id) < 1:
+        label = '系统管理员' if target['role'] == 'admin' else '集团财务总监 / 最终审批人'
+        raise HTTPException(400, f'系统至少需要保留一名启用的{label}')
     deleted = store.delete_user(user_id)
     store.audit(user,'admin.user_delete','user',user_id,{'username':deleted['username'],'role':deleted['role'],'permanent':True},request.client.host if request.client else '')
     return {'deleted':True,'user_id':user_id}
@@ -187,13 +194,13 @@ def audit(limit: int=100, user=Depends(require('admin:audit'))):
 
 
 @router.get('/admin/settings')
-def settings(user=Depends(require('admin:users'))):
+def settings(user=Depends(require('admin:settings'))):
     """Return editable runtime settings without ever returning secret values."""
     return _settings_payload()
 
 
 @router.patch('/admin/settings')
-def patch_settings(body: SettingsPatch, request: Request, user=Depends(require('admin:users'))):
+def patch_settings(body: SettingsPatch, request: Request, user=Depends(require('admin:settings'))):
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(400, '没有可保存的配置')
@@ -213,7 +220,7 @@ def patch_settings(body: SettingsPatch, request: Request, user=Depends(require('
 
 
 @router.post('/admin/settings/clear-legacy-model-env')
-def clear_legacy_model_env(request: Request, user=Depends(require('admin:users'))):
+def clear_legacy_model_env(request: Request, user=Depends(require('admin:settings'))):
     """Remove obsolete model keys from the local .env after config.json migration."""
     # Verify that the sole runtime config file exists before modifying the
     # legacy bootstrap file.
@@ -230,7 +237,10 @@ def clear_legacy_model_env(request: Request, user=Depends(require('admin:users')
 
 
 @router.post('/admin/settings/test')
-async def test_settings(body: SettingsTest, user=Depends(require('admin:users'))):
+async def test_settings(body: SettingsTest, user=Depends(require('admin:settings'))):
+    if body.kind == 'exa':
+        from .services.exa_mcp import probe_exa_mcp
+        return {'kind': 'exa', **probe_exa_mcp()}
     values = get_model_runtime_config()
     prefix = {'llm': 'llm', 'mask': 'mask_llm', 'rerank': 'rerank', 'embedding': 'embedding'}[body.kind]
     base = (body.api_base or values.get(f'{prefix}_api_base') or values.get(f'{prefix}_base_url') or '').strip()

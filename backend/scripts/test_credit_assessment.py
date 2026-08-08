@@ -25,10 +25,11 @@ from app.services.credit import assess_credit_compliance
 def main():
     store.init_db()
     admin = store.authenticate('admin', 'AdminPassword2026!')
+    reviewer = store.create_user('reviewer', '信用审核专员', 'reviewer', 'ReviewerPassword2026!')
     case = store.create_credit_case('量化测试客户', {
         'max_credit_amount': 1_000_000, 'currency': 'CNY', 'max_payment_days': 120,
         'min_prepayment_ratio': 20, 'allowed_payment_methods': ['bank_transfer'], 'allow_vmi_jit': False,
-    }, '量化信审回归测试', admin, 'TKP')
+    }, '量化信审回归测试', reviewer, 'TKP')
     assert case['business_type'] == 'TKP'
 
     report_path = Path(runtime) / 'customer_financial.txt'
@@ -37,11 +38,11 @@ def main():
         '资产总额 30000000 元', '负债总额 12000000 元', '净利润 1600000 元',
         '经营现金流 2400000 元', '信用评级 AA+', '审计意见：无保留意见',
     ]), encoding='utf-8')
-    document = store.add_credit_document(case['case_id'], 'financial_report', report_path.name, str(report_path), admin)
+    document = store.add_credit_document(case['case_id'], 'financial_report', report_path.name, str(report_path), reviewer)
     snapshot = store.save_credit_exposure_snapshot(case['case_id'], {
         'current_receivables': 100_000, 'booked_order_amount': 200_000,
         'overdue_amount': 0, 'overdue_days': 0, 'currency': 'CNY',
-    }, admin)
+    }, reviewer)
     raw_document = store.get_credit_document(case['case_id'], document['document_id'])
     # The business graph has no alternate mode.  Mock only the remote ReAct
     # boundary so this offline regression can exercise the production policy
@@ -64,9 +65,13 @@ def main():
     assert report['assessment']['recommendation']['max_payment_days'] == 90
     assert report['assessment']['recommendation']['max_credit_amount'] == 1_000_000
     assert len(evidence) >= 7
-    assert all(row['category'] == 'react_verified_claim' for row in evidence)
+    # 量化事实必须来自 ReAct 已核验主张；同一次生产图谱还会保留
+    # 只供人工判断的 Exa 公开尽调来源，不能再将全部证据限定为旧分类。
+    verified_claims = [row for row in evidence if row['category'] == 'react_verified_claim']
+    assert len(verified_claims) >= 7
+    assert {row['category'] for row in evidence}.issubset({'react_verified_claim', 'external_due_diligence'})
 
-    task = store.start_credit_assessment(case['case_id'], admin)
+    task = store.start_credit_assessment(case['case_id'], reviewer)
     stored = store.finish_credit_assessment(task['assessment_id'], report, evidence)
     assert stored['status'] == 'done'
     assert stored['report']['assessment']['scorecard']['coverage'] >= .9

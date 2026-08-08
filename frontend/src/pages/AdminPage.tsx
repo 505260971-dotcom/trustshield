@@ -1,52 +1,31 @@
 import { useEffect, useState } from 'react'
-import { Alert, Button, Card, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd'
+import { Alert, Button, Card, Drawer, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd'
 import { AuditOutlined, DeleteOutlined, EditOutlined, ExclamationCircleOutlined, PlusOutlined, TeamOutlined } from '@ant-design/icons'
 import { api } from '../services/api'
 import { fmtTime } from '../components/common'
 import { useAuth } from '../context/AuthContext'
-import type { CreditRouteVersion, RuleItem, RuleVersion } from '../types'
 
 const { Text } = Typography
-const businessTypes = ['全部', '一般', '模塑一体', 'TKM', 'TKP', '采购订单']
-const labels:Record<string,string> = {admin:'集团财务总监（最终审批人）',director:'财务审批主管',reviewer:'信用审核专员',business:'业务申请人'}
-const versionStatusText:Record<string,string> = { draft:'草稿', published:'已发布', archived:'已归档' }
-const roleOptions=['business','reviewer','director','admin'].map(value=>({value,label:labels[value]}))
+const labels:Record<string,string> = {admin:'系统管理员',final_approver:'集团财务总监（最终审批人）',director:'财务审批主管',reviewer:'信用审核专员',business:'业务申请人'}
+const roleOptions=['business','reviewer','director','final_approver','admin'].map(value=>({value,label:labels[value]}))
 type User = {id:string;username:string;display_name:string;role:string;active:number;created_at:number;updated_at:number}
 
 export default function AdminPage(){
   const {user:currentUser}=useAuth()
   const [users,setUsers]=useState<User[]>([])
   const [audit,setAudit]=useState<any[]>([])
-  const [versions,setVersions]=useState<RuleVersion[]>([])
-  const [selectedVersion,setSelectedVersion]=useState('')
-  const [rules,setRules]=useState<RuleItem[]>([])
-  const [routeVersions,setRouteVersions]=useState<CreditRouteVersion[]>([])
-  const [selectedRouteVersion,setSelectedRouteVersion]=useState('')
-  const [route,setRoute]=useState<CreditRouteVersion|null>(null)
   const [userOpen,setUserOpen]=useState(false)
   const [editingUser,setEditingUser]=useState<User|null>(null)
-  const [ruleOpen,setRuleOpen]=useState(false)
-  const [editing,setEditing]=useState<RuleItem|null>(null)
   const [resetting,setResetting]=useState(false)
   const [userForm]=Form.useForm()
-  const [ruleForm]=Form.useForm()
-  const [routeForm]=Form.useForm()
 
   const load=async()=>{
     try{
-      const [u,a,v,r]=await Promise.all([api.adminUsers(),api.audit(),api.ruleVersions(),api.creditRouteVersions()])
-      setUsers(u.items);setAudit(a.items);setVersions(v.items);setRouteVersions(r.items)
-      const active=selectedVersion||v.items.find((x:RuleVersion)=>x.status==='published')?.version||''
-      if(active)await loadRules(active)
-      const activeRoute=selectedRouteVersion||r.items.find((x:CreditRouteVersion)=>x.status==='published')?.version||''
-      if(activeRoute)await loadRoute(activeRoute)
+      const [u,a]=await Promise.all([api.adminUsers(),api.audit()])
+      setUsers(u.items);setAudit(a.items)
     }catch(e:any){message.error(e.message||'加载管理数据失败')}
   }
-  const loadRules=async(version:string)=>{try{const result=await api.ruleVersion(version);setSelectedVersion(version);setRules(result.rules)}catch(e:any){message.error(e.message||'加载规则版本失败')}}
-  const loadRoute=async(version:string)=>{try{const result=await api.creditRouteVersion(version);setSelectedRouteVersion(version);setRoute(result);routeForm.setFieldsValue(result.config)}catch(e:any){message.error(e.message||'加载信用审核审批路径失败')}}
   useEffect(()=>{load()},[])
-  const selected=versions.find(x=>x.version===selectedVersion)
-  const editable=selected?.status==='draft'
   const closeUser=()=>{setUserOpen(false);setEditingUser(null);userForm.resetFields()}
   const openCreateUser=()=>{setEditingUser(null);userForm.resetFields();userForm.setFieldsValue({role:'reviewer',active:true});setUserOpen(true)}
   const openEditUser=(member:User)=>{setEditingUser(member);userForm.resetFields();userForm.setFieldsValue({username:member.username,display_name:member.display_name,role:member.role,active:!!member.active,password:''});setUserOpen(true)}
@@ -66,13 +45,6 @@ export default function AdminPage(){
   }
   const patchUser=async(id:string,values:any)=>{try{await api.patchUser(id,values);message.success('成员状态已更新');load()}catch(e:any){message.error(e.message||'更新失败')}}
   const removeUser=async(member:User)=>{try{await api.deleteUser(member.id);message.success('成员已永久删除，无法恢复');load()}catch(e:any){message.error(e.message||'删除失败')}}
-  const createDraft=async()=>{try{const result=await api.createRuleDraft();message.success('已创建草稿 '+result.version);setVersions([]);await load();await loadRules(result.version)}catch(e:any){message.error(e.message||'创建草稿失败')}}
-  const editRule=(rule:RuleItem)=>{setEditing(rule);ruleForm.setFieldsValue({...rule,applies_to:rule.applies_to||['全部']});setRuleOpen(true)}
-  const saveRule=async()=>{try{const values=await ruleForm.validateFields();if(!editing)return;await api.updateRule(selectedVersion,editing.id,values);message.success('规则草稿已保存');setRuleOpen(false);await loadRules(selectedVersion)}catch(e:any){if(e?.errorFields)return;message.error(e.message||'规则保存失败')}}
-  const publish=async()=>{try{await api.publishRuleVersion(selectedVersion);message.success('规则版本已发布，新发起的审查将使用此版本');await load()}catch(e:any){message.error(e.message||'发布失败')}}
-  const createRouteDraft=async()=>{try{const result=await api.createCreditRouteDraft();message.success('已创建信用审核审批路径草稿 '+result.version);await load();await loadRoute(result.version)}catch(e:any){message.error(e.message||'创建审批路径草稿失败')}}
-  const saveRoute=async()=>{try{if(!route)return;const config=await routeForm.validateFields();await api.updateCreditRoute(route.version,config);message.success('信用审核审批路径草稿已保存');await loadRoute(route.version)}catch(e:any){if(e?.errorFields)return;message.error(e.message||'保存审批路径草稿失败')}}
-  const publishRoute=async()=>{try{if(!route)return;await api.publishCreditRouteVersion(route.version);message.success('信用审核审批路径已发布，新提交的信用审核将按此路径处理');await load()}catch(e:any){message.error(e.message||'发布审批路径失败')}}
   const confirmResetBusinessData=()=>{
     Modal.confirm({
       title:'重置全部业务演示数据？',
@@ -95,18 +67,18 @@ export default function AdminPage(){
   }
 
   const activeMembers=users.filter(member=>member.active).length
-  const draftCount=versions.filter(version=>version.status==='draft').length+(route?.status==='draft'?1:0)
   return <div className="role-page governance-page">
     <section className="page-hero page-hero-light governance-hero">
-      <div><span className="section-kicker">权限与规则</span><Typography.Title level={2}>组织与规则</Typography.Title><Typography.Paragraph>统一维护成员权限、合同底线和信用审核审批路径。规则和审批路径均通过“草稿—发布”生效，已进入流程的案件会保留当时使用的版本。</Typography.Paragraph></div>
-      <div className="page-hero-actions"><Tag color="purple">仅最终审批人可维护</Tag><Tag color="green">审计全程留痕</Tag></div>
+      <div><span className="section-kicker">系统治理</span><Typography.Title level={2}>组织与权限</Typography.Title><Typography.Paragraph>统一维护成员账号、系统运行配置和操作审计。信用审核由信用审核专员确认生效；后续商业决策在合同审批阶段完成。合同风险条款由信用审核专员起草、财务审批主管复核发布，不在此处维护。</Typography.Paragraph></div>
+      <div className="page-hero-actions"><Tag color="purple">仅系统管理员可维护</Tag><Tag color="green">审计全程留痕</Tag></div>
     </section>
     <section className="compact-metrics" aria-label="治理概览">
       <div className="compact-metric"><span className="compact-metric-icon"><TeamOutlined/></span><div><small>启用成员</small><strong>{activeMembers}</strong><em>共 {users.length} 个账户</em></div></div>
-      <div className="compact-metric metric-attention"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>规则版本</small><strong>{versions.length}</strong><em>{selected?.status==='draft'?'当前正在编辑草稿':'当前查看已发布版本'}</em></div></div>
-      <div className="compact-metric metric-warning"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>待发布草稿</small><strong>{draftCount}</strong><em>发布前请完成复核</em></div></div>
+      <div className="compact-metric metric-attention"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>信用确认</small><strong>1</strong><em>审核专员确认后直接生效</em></div></div>
+      <div className="compact-metric metric-warning"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>合同审批关口</small><strong>2</strong><em>主管和终审均可退回或驳回</em></div></div>
       <div className="compact-metric"><span className="compact-metric-icon"><AuditOutlined/></span><div><small>审计记录</small><strong>{audit.length}</strong><em>当前加载的操作日志</em></div></div>
     </section>
+    {!users.some(member=>member.active&&member.role==='final_approver')&&<Alert showIcon type="warning" style={{marginBottom:16}} message="尚未配置最终审批人" description="需要集团财务总监终审的合同将无法上报。请先创建并启用至少一名“集团财务总监（最终审批人）”。信用审核仍由信用审核专员确认后直接生效。"/>}
     <Card className="governance-card" title="业务演示数据重置" extra={<Button danger loading={resetting} icon={<DeleteOutlined/>} onClick={confirmResetBusinessData}>重置全部业务记录</Button>}>
       <Alert showIcon type="warning" message="仅清理业务数据，不影响登录和模型配置" description="用于重新开始一轮演示。会清除所有信审、合同审查及其材料、评估、风险、审批、补件、流程任务、审计历史和上传文件；人员账户、LLM 配置、重排/向量配置、规则版本、信用模型和审批路径会保留。执行前请确认当前没有需要保留的记录。"/>
     </Card>
@@ -122,20 +94,9 @@ export default function AdminPage(){
       ]}/>
     </Card>
 
-    <Card className="governance-card" title="合同底线规则版本" extra={<Space><Button onClick={createDraft} icon={<PlusOutlined/>}>从已发布版本创建草稿</Button>{editable&&<Popconfirm title={'发布 '+selectedVersion+' 后将替换当前生效版本，确认吗？'} onConfirm={publish}><Button type="primary">发布草稿</Button></Popconfirm>}</Space>}>
-      <Space style={{marginBottom:12}} wrap><Text type="secondary">当前查看：</Text><Select value={selectedVersion||undefined} style={{minWidth:220}} onChange={loadRules} options={versions.map(version=>({value:version.version,label:version.version+' · '+(versionStatusText[version.status]||version.status)}))}/>{selected&&<Tag color={selected.status==='published'?'green':selected.status==='draft'?'orange':'default'}>{versionStatusText[selected.status]||selected.status}</Tag>}</Space>
-      <Table rowKey="id" dataSource={rules} size="small" pagination={{pageSize:8}} scroll={{x:900}} columns={[
-        {title:'规则',dataIndex:'id',width:72,render:(value:string,rule:RuleItem)=><Tag color={rule.severity==='high'?'red':'orange'}>{value}</Tag>},
-        {title:'规则底线',dataIndex:'baseline',width:260},{title:'适用业务',dataIndex:'applies_to',width:150,render:(value:string[])=>value?.join('、')},
-        {title:'例外审批',dataIndex:'approval_role',width:120,render:(value:string)=>value?labels[value]||value:'—'},
-        {title:'建议改写',dataIndex:'template',ellipsis:true},{title:'操作',width:80,render:(_:unknown,rule:RuleItem)=><Button disabled={!editable} size="small" icon={<EditOutlined/>} onClick={()=>editRule(rule)}>编辑</Button>}
-      ]}/>
-    </Card>
-
-    <Card className="governance-card" title="信用审核审批路径" extra={<Space><Button onClick={createRouteDraft} icon={<PlusOutlined/>}>从已发布版本创建草稿</Button>{route?.status==='draft'&&<><Button onClick={saveRoute}>保存草稿</Button><Popconfirm title={'发布 '+route.version+' 后将替换当前生效审批路径，确认吗？'} onConfirm={publishRoute}><Button type="primary">发布草稿</Button></Popconfirm></>}</Space>}>
-      <Alert showIcon type="info" style={{marginBottom:16}} message="统一管理审批路径" description="每份信用审核先由财务审批主管复核；只有达到额度、账期、预付款、承兑汇票、VMI/JIT 或人工修订等条件时，才提交集团财务总监最终审批。已提交的案件会保留当时使用的审批路径，不受后续发布影响。"/>
-      <Space style={{marginBottom:12}} wrap><Text type="secondary">当前查看：</Text><Select value={selectedRouteVersion||undefined} style={{minWidth:240}} onChange={loadRoute} options={routeVersions.map(version=>({value:version.version,label:version.version+' · '+(versionStatusText[version.status]||version.status)}))}/>{route&&<Tag color={route.status==='published'?'green':route.status==='draft'?'orange':'default'}>{versionStatusText[route.status]||route.status}</Tag>}</Space>
-      {route&&<Form form={routeForm} layout="vertical" disabled={route.status!=='draft'}><Space wrap align="start"><Form.Item name="final_threshold_amount" label="提交最终审批：额度不低于" rules={[{required:true}]}><InputNumber min={0} precision={2} addonAfter="CNY"/></Form.Item><Form.Item name="final_threshold_payment_days" label="提交最终审批：账期不低于" rules={[{required:true}]}><InputNumber min={0} addonAfter="天"/></Form.Item><Form.Item name="final_threshold_prepayment_ratio" label="提交最终审批：最低预付款比例不高于" rules={[{required:true}]}><InputNumber min={0} max={100} addonAfter="%"/></Form.Item></Space><Space wrap><Form.Item name="final_on_manual_override" label="人工修订或兜底审批" valuePropName="checked"><Switch checkedChildren="提交终审" unCheckedChildren="主管结束"/></Form.Item><Form.Item name="final_on_acceptance_bill" label="包含承兑汇票" valuePropName="checked"><Switch checkedChildren="提交终审" unCheckedChildren="主管结束"/></Form.Item><Form.Item name="final_on_vmi_jit" label="允许 VMI/JIT" valuePropName="checked"><Switch checkedChildren="提交终审" unCheckedChildren="主管结束"/></Form.Item></Space><Form.Item name="director_required" hidden valuePropName="checked"><Switch/></Form.Item></Form>}
+    <Card className="governance-card" title="信用审核确认机制">
+      <Alert showIcon type="success" message="信用审核专员确认即生效" description="系统管理员不再配置重复的信用审核主管/终审路径。审核专员负责确认授信条件及每条联网公开信息是否纳入；已纳入的来源、理由和授信条件会冻结到合同审查报告，财务审批主管和集团财务总监在合同审批时可查看、退回或驳回合同。"/>
+      <Text type="secondary" style={{display:'block',marginTop:12}}>历史审批路径版本仅用于已存在的历史记录追溯，不会影响新信用审核版本。</Text>
     </Card>
 
     <Card className="governance-card" title={<Space><AuditOutlined/>合同评审审计日志</Space>}>
@@ -158,8 +119,5 @@ export default function AdminPage(){
       </Form>
     </Drawer>
 
-    <Modal title={'编辑 '+(editing?.id||'')+' 草稿规则'} open={ruleOpen} onCancel={()=>setRuleOpen(false)} onOk={saveRule} okText="保存草稿">
-      <Form form={ruleForm} layout="vertical"><Form.Item name="baseline" label="底线规则" rules={[{required:true}]}><Input.TextArea rows={2}/></Form.Item><Form.Item name="check" label="规则判定说明" rules={[{required:true}]}><Input.TextArea rows={2}/></Form.Item><Form.Item name="severity" label="风险等级" rules={[{required:true}]}><Select options={['high','mid','low'].map(value=>({value,label:value==='high'?'高风险':value==='mid'?'中风险':'低风险'}))}/></Form.Item><Form.Item name="applies_to" label="适用业务类型" rules={[{required:true}]}><Select mode="multiple" options={businessTypes.map(value=>({value,label:value}))}/></Form.Item><Form.Item name="approval_role" label="例外审批层级"><Select allowClear options={[{value:'director',label:'财务审批主管'},{value:'admin',label:'集团财务总监（最终审批人）'}]}/></Form.Item><Form.Item name="template" label="建议改写模板" rules={[{required:true}]}><Input.TextArea rows={3}/></Form.Item></Form>
-    </Modal>
   </div>
 }

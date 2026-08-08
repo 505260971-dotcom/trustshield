@@ -4,7 +4,8 @@ import { CheckCircleTwoTone, ExclamationCircleTwoTone, CloseCircleTwoTone } from
 
 /** Technical RBAC identifiers never leak into the business-facing UI. */
 export const approvalRoleLabel = (role?: string) => ({
-  admin: '集团财务总监（最终审批人）',
+  admin: '系统管理员',
+  final_approver: '集团财务总监（最终审批人）',
   director: '财务审批主管',
   reviewer: '信用审核专员',
   business: '业务申请人',
