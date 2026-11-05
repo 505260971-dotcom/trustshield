@@ -1,5 +1,14 @@
 # 信盾 TrustShield
 
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white"/>
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&logoColor=white"/>
+  <img alt="LangGraph" src="https://img.shields.io/badge/LangGraph-1.2-2C5F5D"/>
+  <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white"/>
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white"/>
+  <img alt="HKUST Hackathon" src="https://img.shields.io/badge/HKUST%20Hackathon-Winner%20%C2%B7%20Best%20Architecture-FFD700"/>
+</p>
+
 > **授信先定边界，合同再审条款——越界过不去，全程有人负责。**
 
 **信盾 TrustShield** 是面向制造企业的 AI 信审与合同风险协同工作台。创新不只是“用模型审合同”，而是让 Agent 在受控权限内自主读取证据、核验主张、形成建议、识别缺件并推动流程；在信审时还可通过 Exa 联网检索第三方企业信用报告/信评、近期诉讼/纠纷、监管信息及近期经营情况（业绩、订单、合作与重大合同）等公开信息，整理成逐条可核验的外部尽调线索。信用审核专员决定每条线索是否纳入本次判断，再把确认后的信用边界和证据包固化给合同审批使用。金额、账期、预付款、付款方式及 VMI/JIT 越界即阻断，必须回信审更新后复审，而非停留在静态风险报告。人只在核验、例外和审批节点作最终判断；每次 Agent 行动、人工决策与交接均可追溯，形成自治推进、有人兜底的闭环流程。
@@ -8,10 +17,10 @@
 
 | | |
 | --- | --- |
-| 🖥️ 在线体验 | [https://ts.chengtx.vip](https://ts.chengtx.vip) — 打开即试，无需注册 |
+| 🚀 本地一键启动 | `python dev.py` — 同时拉起前后端并自动打开浏览器，无需注册、无需云端 Key 即可跑通演示链路 |
 | 📊 路演 PPT | [信盾-路演PPT-v2.html](./docs/03-演示与交付/信盾-路演PPT-v2.html) — 单文件离线打开，11 页含动画 |
-| 🚀 一键启动 | `python dev.py` — 同时启动前后端并自动打开浏览器 |
-| 📦 开源仓库 | [github.com/chengtx007/trustshield](https://github.com/chengtx007/trustshield) |
+| 📦 代码仓库 | [github.com/505260971-dotcom/trustshield](https://github.com/505260971-dotcom/trustshield) |
+| 📄 交付材料 | [东江集团命题交付材料](./docs/04-交付文档/README.md) — 方案设计、脱敏样本验证、源码与部署说明 |
 
 ## 亮点数据（系统真实跑通 · 启明智造场景）
 
@@ -25,21 +34,33 @@
 
 ## 界面速览
 
-<div align="center">
-<img src="演示PPT/原始素材/02-越界阻断现场.png" width="49%" alt="越界阻断现场"/>
-<img src="演示PPT/原始素材/03-客户信用审核.png" width="49%" alt="客户信用审核"/>
-<br/>
-<sub>左：越界阻断现场 —— 首版合同被系统拦下：4 项信审阻断 + 15 次规则触发，导出直接被拒；右：客户信用审核 —— 额度、账期、付款方式、VMI-JIT 等信用边界在此生效</sub>
-</div>
+<p align="center">
+  <img src="./docs/03-演示与交付/PPT图片导出/slide-06-可视化演示-截图-动画.gif" width="92%" alt="信盾全流程界面演示"/>
+  <br/>
+  <sub>全流程界面演示：信审建立商业边界 → 合同上传解析 → 风险定位与原文高亮 → 越界阻断 → 修订与导出</sub>
+</p>
 
-<br/>
+<p align="center">
+  <img src="./docs/03-演示与交付/PPT图片导出/slide-08-AI-Agent-技术完成度.png" width="92%" alt="AI Agent 技术完成度"/>
+  <br/>
+  <sub>AI Agent 技术完成度：命题 12 项要求逐条落地与证据对照</sub>
+</p>
 
-<div align="center">
-<img src="演示PPT/原始素材/01-角色工作台.png" width="49%" alt="角色工作台"/>
-<img src="演示PPT/原始素材/04-客户工作台.png" width="49%" alt="客户工作台"/>
-<br/>
-<sub>左：角色工作台 —— 五个角色各管一段，待办按角色直达；右：客户工作台 —— 授信额度占用与可用额度模拟</sub>
-</div>
+<!-- ===== 真实界面截图（补齐后取消注释） =====
+<p align="center">
+  <img src="./docs/images/ui-01-角色工作台.png" width="49%" alt="角色工作台"/>
+  <img src="./docs/images/ui-02-客户信用审核.png" width="49%" alt="客户信用审核"/>
+  <br/>
+  <sub>左：角色工作台 —— 五个角色各管一段，待办按角色直达；右：客户信用审核 —— 额度、账期、付款方式、VMI-JIT 在此生效</sub>
+</p>
+
+<p align="center">
+  <img src="./docs/images/ui-03-越界阻断.png" width="49%" alt="越界阻断现场"/>
+  <img src="./docs/images/ui-04-合同风险报告.png" width="49%" alt="合同风险报告"/>
+  <br/>
+  <sub>左：越界阻断 —— 4 项信审阻断 + 15 次规则触发，导出直接被拒（409）；右：风险报告 —— 每条风险绑定原文引文与页码</sub>
+</p>
+===== 真实界面截图结束 ===== -->
 
 ## 目录
 
@@ -269,6 +290,30 @@ Agent 联网检索公开信息（Exa）并提取标题、摘要、来源、时�
 - **客户工作台**：展示授信额度占用，支持"模拟下单"测算可用额度（headroom simulate）——让评审现场可直观解释"为什么这笔合同会越界"；
 - 批量矩阵（batch-matrix）支持按客户/条款维度汇总多份合同的待办与风险分布。
 ## 系统架构
+
+### 双链路与门控（一张图看完）
+
+```mermaid
+flowchart TD
+    A["业务申请人<br/>发起客户信审"] --> B["信用审核专员<br/>证据核验 · 敞口快照"]
+    B --> X["ReAct Agent 读取受控证据<br/>Claim 核验 + Exa 公开信息尽调"]
+    X --> C{"证据是否充分"}
+    C -- "否 / 模型不可用" --> C2["fail-closed<br/>不出可用结论，说明缺件与原因"]
+    C -- "是" --> E["已生效商业边界（版本快照）<br/>额度 · 账期 · 预付款 · 付款方式 · VMI-JIT"]
+    E --> F["合同案件<br/>解析 → 本地脱敏 → 字段抽取"]
+    F --> G["规则候选<br/>16 条封闭底限 · 词法门控"]
+    G --> H["语义研判<br/>hybrid 召回 + qwen3-rerank 精排"]
+    H --> I["确定性规则裁决<br/>底限全量 + 信审越界校验"]
+    I --> J{"是否越界"}
+    J -- "越界" --> K["409 阻断<br/>必须回信审更新后复审"]
+    J -- "通过" --> L["审核员逐条处置<br/>采用 / 编辑 / 不适用 · 补件 · 例外审批"]
+    L --> M["导出：原文 / 修订建议 / 双语对照<br/>导出前再校验一次绑定"]
+    M --> N["签约归档 · 全链路审计留痕"]
+```
+
+> 三条硬约束体现在图上：**边界先于合同**（E 在 F 之前）、**模型不可用即失败而非降级**（C2）、**越界不能从合同端绕过**（K）。
+
+### 部署形态
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
