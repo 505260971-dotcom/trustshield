@@ -35,9 +35,11 @@
 ## 界面速览
 
 <p align="center">
-  <img src="./docs/03-演示与交付/PPT图片导出/slide-06-可视化演示-截图-动画.gif" width="92%" alt="信盾全流程界面演示"/>
+  <img src="./docs/03-演示与交付/PPT图片导出/slide-06-演示-网页版.gif" width="92%" alt="信盾全流程界面演示"/>
   <br/>
   <sub>全流程界面演示：信审建立商业边界 → 合同上传解析 → 风险定位与原文高亮 → 越界阻断 → 修订与导出</sub>
+  <br/>
+  <sub>（<a href="./docs/03-演示与交付/PPT图片导出/slide-06-可视化演示-截图-动画.gif">查看 1920×1080 高清版</a>）</sub>
 </p>
 
 <p align="center">
